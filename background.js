@@ -669,7 +669,7 @@ async function fillModalByPayload(payload) {
   result.successRate = result.filledDays / result.totalDays;
   result.ok = result.errors.length === 0;
 
-    console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功, ${result.errors.length} 個錯誤`);
+    console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`);
 
     return result;
 
@@ -1182,7 +1182,7 @@ async function executeTschoolkitFlow(tabId) {
       console.log(`[ClassSync] 步驟 ${fillAttempts}.2: 開始執行腳本注入`);
       const scriptResult = await chrome.scripting.executeScript({
         target: { tabId: tabId },
-        func: (payload) => {
+        func: async (payload) => {
           // 內聯的 fillModalByPayload 函數
           try {
             console.log("[ClassSync Fill] 開始填寫 Modal，payload:", payload);
@@ -1358,35 +1358,22 @@ async function executeTschoolkitFlow(tabId) {
                   let customLocationValue = null;
 
                   if (target.value === "其他地點") {
-                    // 同步等待動態輸入框出現
                     const container = sel.closest('.w-full');
                     let customInput = null;
                     let retryCount = 0;
                     const maxRetries = 10;
+                    const interval = 100;
 
-                    // 等待一小段時間讓動態元素渲染
-                    const startTime = Date.now();
-                    const timeout = 1500; // 1.5秒超時
-
-                    while (!customInput && retryCount < maxRetries && (Date.now() - startTime) < timeout) {
+                    while (!customInput && retryCount < maxRetries) {
+                      await new Promise(r => setTimeout(r, interval));
                       customInput = container?.querySelector('input[type="text"]');
-                      if (!customInput) {
-                        retryCount++;
-                        // 使用同步的方式等待一小段時間
-                        const waitTime = Date.now() + 100;
-                        while (Date.now() < waitTime) {
-                          // 忙等待 100ms
-                        }
-                      }
+                      retryCount++;
                     }
 
                     if (customInput) {
-                      console.log(`[ClassSync Fill] ✅ 找到動態輸入框（重試 ${retryCount} 次）`);
+                      console.log(`[ClassSync Fill] ✅ 找到動態輸入框（重試 ${retryCount - 1} 次）`);
 
-                      // 解析期望的地點名稱（如果是自定義格式）
                       let customLocationName = want;
-
-                      // 如果 want 格式是 "其他地點:實際地點名稱"，提取實際地點名稱
                       if (want.includes(':')) {
                         const parts = want.split(':');
                         if (parts.length === 2 && parts[0].trim() === "其他地點") {
@@ -1396,37 +1383,32 @@ async function executeTschoolkitFlow(tabId) {
 
                       console.log(`[ClassSync Fill] 時段 ${i + 1}: 填寫自定義地點輸入框 "${customLocationName}"`);
 
-                      // 確保輸入框可見且可編輯
                       if (customInput.offsetWidth > 0 && customInput.offsetHeight > 0 && !customInput.disabled) {
                         customInput.focus();
-                        customInput.value = customLocationName;
-                        customInput.dispatchEvent(new Event("input", { bubbles: true }));
-                        customInput.dispatchEvent(new Event("change", { bubbles: true }));
+                        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        nativeSetter.call(customInput, customLocationName);
+                        customInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+                        customInput.dispatchEvent(new Event('change', { bubbles: true }));
                         customInput.blur();
 
-                        // 同步等待一小段時間讓值更新
-                        const updateWaitTime = Date.now() + 150;
-                        while (Date.now() < updateWaitTime) {
-                          // 忙等待 150ms
-                        }
-
+                        await new Promise(r => setTimeout(r, 100));
                         customLocationValue = customInput.value;
-                        customLocationSuccess = customInput.value === customLocationName;
+                        customLocationSuccess = customLocationValue === customLocationName;
 
                         console.log(`[ClassSync Fill] 時段 ${i + 1}: 自定義地點輸入 ${customLocationSuccess ? '✅' : '❌'} "${customLocationName}" -> "${customLocationValue}"`);
                       } else {
-                        console.warn(`[ClassSync Fill] 時段 ${i + 1}: 自定義輸入框不可編輯或不可見`);
+                        console.warn(`[ClassSync Fill] 時段 ${i + 1}: 自定義輸入框不可編輯或不可見，outerHTML: ${customInput.outerHTML}`);
                         customLocationSuccess = false;
                       }
                     } else {
-                      console.warn(`[ClassSync Fill] 時段 ${i + 1}: 選擇了「其他地點」但找不到自定義輸入框（${maxRetries}次重試，${timeout}ms超時）`);
+                      console.warn(`[ClassSync Fill] 時段 ${i + 1}: 選擇了「其他地點」但找不到自定義輸入框（${maxRetries}次重試）`);
                       customLocationSuccess = false;
                     }
                   }
 
                   // 驗證是否設定成功
                   const newValue = sel.value;
-                  const selectSuccess = newValue === target.value && newValue !== oldValue;
+                  const selectSuccess = newValue === target.value;
                   const overallSuccess = selectSuccess && customLocationSuccess;
 
                   console.log(`[ClassSync Fill] 時段 ${i + 1}: ${overallSuccess ? '✅' : '❌'} "${want}" -> "${target.textContent?.trim()}" (${oldValue} -> ${newValue})${customLocationValue ? ` + 自定義地點: "${customLocationValue}"` : ''}`);
@@ -1488,7 +1470,7 @@ async function executeTschoolkitFlow(tabId) {
             result.successRate = result.totalDays > 0 ? result.filledDays / result.totalDays : 0;
             result.ok = result.errors.length === 0;
 
-            console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功, ${result.errors.length} 個錯誤`);
+            console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`);
             console.log(`[ClassSync Fill] 詳細結果:`, result);
 
             return result;
