@@ -1,0 +1,43 @@
+{
+    "manifest_version": 3,
+    "name": "ClassSync 一鍵填寫學習週曆",
+    "version": "0.2.0",
+    "description": "已登入 1Campus 後，一鍵自動開啟並填寫學習週曆。支援外部資料注入。",
+    "permissions": [
+        "tabs",
+        "scripting",
+        "storage"
+    ],
+    "host_permissions": [
+        "https://app.1campus.net/*",
+        "https://tschoolkit.web.app/*"
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "run_at": "document_start"
+        }
+    ],
+    "externally_connectable": {
+        "matches": [
+            "https://*.example.com/*",
+            "http://localhost:*/*",
+            "https://localhost:*/*"
+        ]
+    },
+    "action": {
+        "default_title": "一鍵填寫學習週曆"
+    },
+    "background": {
+        "service_worker": "background.js"
+    },
+    "options_ui": {
+        "page": "options.html",
+        "open_in_tab": true
+    }
+}
