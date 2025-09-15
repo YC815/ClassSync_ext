@@ -669,7 +669,7 @@ async function fillModalByPayload(payload) {
   result.successRate = result.filledDays / result.totalDays;
   result.ok = result.errors.length === 0;
 
-    console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功, ${result.errors.length} 個錯誤`);
+    console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`);
 
     return result;
 
@@ -1426,7 +1426,7 @@ async function executeTschoolkitFlow(tabId) {
 
                   // 驗證是否設定成功
                   const newValue = sel.value;
-                  const selectSuccess = newValue === target.value && newValue !== oldValue;
+                  const selectSuccess = newValue === target.value;
                   const overallSuccess = selectSuccess && customLocationSuccess;
 
                   console.log(`[ClassSync Fill] 時段 ${i + 1}: ${overallSuccess ? '✅' : '❌'} "${want}" -> "${target.textContent?.trim()}" (${oldValue} -> ${newValue})${customLocationValue ? ` + 自定義地點: "${customLocationValue}"` : ''}`);
@@ -1488,7 +1488,7 @@ async function executeTschoolkitFlow(tabId) {
             result.successRate = result.totalDays > 0 ? result.filledDays / result.totalDays : 0;
             result.ok = result.errors.length === 0;
 
-            console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功, ${result.errors.length} 個錯誤`);
+            console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`);
             console.log(`[ClassSync Fill] 詳細結果:`, result);
 
             return result;
