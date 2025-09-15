@@ -1347,11 +1347,15 @@ async function executeTschoolkitFlow(tabId) {
 
                 if (target) {
                   const oldValue = sel.value;
-                  sel.value = target.value;
 
-                  // 觸發 change 事件
+                  // 同步選項狀態並觸發事件
+                  target.selected = true;
+                  sel.value = target.value;
                   sel.dispatchEvent(new Event("change", { bubbles: true }));
                   sel.dispatchEvent(new Event("input", { bubbles: true }));
+
+                  // 等待 DOM/框架更新
+                  await new Promise(r => setTimeout(r, 50));
 
                   // 如果選擇的是「其他地點」，需要處理自定義輸入框
                   let customLocationSuccess = true;
@@ -1361,8 +1365,8 @@ async function executeTschoolkitFlow(tabId) {
                     const container = sel.closest('.w-full');
                     let customInput = null;
                     let retryCount = 0;
-                    const maxRetries = 10;
-                    const interval = 100;
+                    const maxRetries = 20;
+                    const interval = 150;
 
                     while (!customInput && retryCount < maxRetries) {
                       await new Promise(r => setTimeout(r, interval));
@@ -1391,7 +1395,7 @@ async function executeTschoolkitFlow(tabId) {
                         customInput.dispatchEvent(new Event('change', { bubbles: true }));
                         customInput.blur();
 
-                        await new Promise(r => setTimeout(r, 100));
+                        await new Promise(r => setTimeout(r, 150));
                         customLocationValue = customInput.value;
                         customLocationSuccess = customLocationValue === customLocationName;
 
@@ -1409,6 +1413,7 @@ async function executeTschoolkitFlow(tabId) {
                   // 驗證是否設定成功
                   const newValue = sel.value;
                   const selectSuccess = newValue === target.value;
+                  console.log(`[ClassSync Fill] 時段 ${i + 1}: 檢查選擇結果 old="${oldValue}" new="${newValue}" target="${target.value}"`);
                   const overallSuccess = selectSuccess && customLocationSuccess;
 
                   console.log(`[ClassSync Fill] 時段 ${i + 1}: ${overallSuccess ? '✅' : '❌'} "${want}" -> "${target.textContent?.trim()}" (${oldValue} -> ${newValue})${customLocationValue ? ` + 自定義地點: "${customLocationValue}"` : ''}`);
