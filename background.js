@@ -66,6 +66,114 @@ async function waitForElement(tabId, selector, maxAttempts = 30, interval = 500)
   return false;
 }
 
+// 智能等待 1Campus 頁面完全載入
+async function waitFor1CampusReady(tabId, maxAttempts = 50, interval = 1000) {
+  console.log(`[ClassSync Wait] 等待 1Campus 頁面完全載入...`);
+
+  const check1CampusReady = () => {
+    // 檢查頁面基本載入狀態
+    if (document.readyState !== 'complete') {
+      return { ready: false, reason: 'document-not-ready', readyState: document.readyState };
+    }
+
+    // 檢查是否有載入指示器（通常SPA會有loading spinner）
+    const loadingSelectors = [
+      '.loading', '.spinner', '[data-loading]', '.loader',
+      '.loading-overlay', '.progress', '.skeleton'
+    ];
+
+    for (const selector of loadingSelectors) {
+      const loading = document.querySelector(selector);
+      if (loading && loading.offsetWidth > 0 && loading.offsetHeight > 0) {
+        return { ready: false, reason: 'still-loading', selector: selector };
+      }
+    }
+
+    // 檢查主要內容區域是否已載入
+    const contentSelectors = [
+      'main', '.main-content', '.content', '.app-content',
+      '[role="main"]', '.container', '.layout'
+    ];
+
+    let hasMainContent = false;
+    for (const selector of contentSelectors) {
+      const content = document.querySelector(selector);
+      if (content && content.offsetWidth > 0 && content.offsetHeight > 0) {
+        hasMainContent = true;
+        break;
+      }
+    }
+
+    if (!hasMainContent) {
+      return { ready: false, reason: 'no-main-content' };
+    }
+
+    // 檢查是否有學習週曆相關元素（這是我們的目標）
+    const learningCalendarImg = document.querySelector('img[alt="學習週曆"]');
+    const learningCalendarText = Array.from(document.querySelectorAll('*')).find(el =>
+      el.textContent?.includes("學習週曆")
+    );
+
+    // 檢查是否有卡片或按鈕結構（即使還沒有學習週曆）
+    const cardSelectors = [
+      '.card', '.btn', 'button', '[role="button"]',
+      '.item', '.tile', '.panel', 'a[href]'
+    ];
+
+    let hasInteractiveElements = false;
+    for (const selector of cardSelectors) {
+      const elements = document.querySelectorAll(selector);
+      if (elements.length > 0) {
+        hasInteractiveElements = true;
+        break;
+      }
+    }
+
+    // 等待一些互動元素出現，但不強制要求學習週曆
+    if (!hasInteractiveElements) {
+      return { ready: false, reason: 'no-interactive-elements' };
+    }
+
+    // 額外檢查：等待可能的動態內容載入
+    const bodyContent = document.body.textContent?.trim();
+    if (!bodyContent || bodyContent.length < 100) {
+      return { ready: false, reason: 'insufficient-content', contentLength: bodyContent?.length || 0 };
+    }
+
+    return {
+      ready: true,
+      hasLearningCalendar: !!(learningCalendarImg || learningCalendarText),
+      hasMainContent: hasMainContent,
+      hasInteractiveElements: hasInteractiveElements,
+      contentLength: bodyContent.length
+    };
+  };
+
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: check1CampusReady,
+        args: []
+      });
+
+      if (result.ready) {
+        console.log(`[ClassSync Wait] ✅ 1Campus 頁面準備就緒:`, result);
+        return result;
+      }
+
+      console.log(`[ClassSync Wait] 嘗試 ${i + 1}/${maxAttempts}: ${result.reason}`, result);
+      await sleep(interval);
+    } catch (e) {
+      console.log(`[ClassSync Wait] 檢查頁面狀態時出錯 (嘗試 ${i + 1}): ${e.message}`);
+      await sleep(interval);
+    }
+  }
+
+  console.error(`[ClassSync Wait] ❌ 等待 1Campus 頁面準備超時`);
+  return { ready: false, reason: 'timeout' };
+}
+
 // 智能等待工具：等待頁面狀態變化
 async function waitForPageStateChange(tabId, checkFunction, maxAttempts = 20, interval = 500) {
   console.log(`[ClassSync Wait] 等待頁面狀態變化...`);
@@ -216,22 +324,97 @@ function onTabCompleteOnce(tabId, urlStartsWith, handler, timeoutMs = 30000) {
 // ========= 3) 接收／存取 Payload 的管線 =========
 let latestPayloadMem = null;
 
+// ========= UI 狀態管理 =========
+let uiState = {
+  isRunning: false,
+  currentStep: 0,
+  steps: [
+    '開啟 1Campus',
+    '點擊學習週曆',
+    '切換到 tschoolkit',
+    '點擊待填下週',
+    '開啟週曆填報',
+    '自動填寫表單',
+    '提交完成'
+  ]
+};
+
+// 向所有 popup 發送狀態更新
+function notifyUI(type, data = {}) {
+  const message = { type, ...data };
+  console.log(`[ClassSync UI] 通知 UI: ${type}`, data);
+
+  // 嘗試發送到所有可能的 popup
+  chrome.runtime.sendMessage(message).catch(e => {
+    console.log(`[ClassSync UI] UI 通知失敗 (正常，可能沒有打開 popup): ${e.message}`);
+  });
+}
+
+// 更新步驟狀態
+function updateUIStep(stepIndex, status, customText = null) {
+  uiState.currentStep = stepIndex;
+  notifyUI('STEP_UPDATE', {
+    step: stepIndex,
+    status: status,
+    text: customText
+  });
+}
+
 // A) 外部頁面（或 content script 轉發）送進來
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // 處理 UI 控制訊息
+  if (msg?.type === "START_CLASSSYNC") {
+    console.log("[ClassSync] 收到 UI 開始執行指令");
+    uiState.isRunning = true;
+    notifyUI('PROCESS_STARTED');
+    startFlow().catch(error => {
+      console.error("[ClassSync] 執行流程失敗:", error);
+      uiState.isRunning = false;
+      notifyUI('PROCESS_ERROR', { error: error.message });
+    });
+    sendResponse?.({ ok: true });
+    return true; // 保持訊息通道開啟
+  }
+
+  if (msg?.type === "STOP_CLASSSYNC") {
+    console.log("[ClassSync] 收到 UI 停止執行指令");
+    uiState.isRunning = false;
+    notifyUI('PROCESS_COMPLETED', { success: false });
+    sendResponse?.({ ok: true });
+    return true;
+  }
+
+  if (msg?.type === "PING") {
+    console.log("[ClassSync] 收到 UI ping");
+    sendResponse?.({ ok: true, isRunning: uiState.isRunning, currentStep: uiState.currentStep });
+    return true;
+  }
+
   if (msg?.type === "CLASSSYNC_NEXT_WEEK_PAYLOAD") {
     console.log("[ClassSync] 收到外部 payload:", msg.payload);
     if (validatePayload(msg.payload)) {
-      console.log("[ClassSync] Payload 驗證通過，儲存並自動執行");
+      console.log("[ClassSync] Payload 驗證通過，儲存並通知UI");
       latestPayloadMem = msg.payload;
       chrome.storage.session.set({ classsync_payload: latestPayloadMem });
+      notifyUI('DATA_RECEIVED', { data: latestPayloadMem });
       sendResponse?.({ ok: true });
       // 你可以選擇：收到資料就自動開跑
-      startFlow().catch(console.error);
+      if (!uiState.isRunning) {
+        uiState.isRunning = true;
+        notifyUI('PROCESS_STARTED');
+        startFlow().catch(error => {
+          console.error("[ClassSync] 自動執行失敗:", error);
+          uiState.isRunning = false;
+          notifyUI('PROCESS_ERROR', { error: error.message });
+        });
+      }
     } else {
       console.error("[ClassSync] Payload 驗證失敗:", msg.payload);
       sendResponse?.({ ok: false, error: "Invalid payload schema" });
     }
   }
+
+  return true; // 保持訊息通道開啟
 });
 
 // B) （可選）直接從你的網域使用 onMessageExternal
@@ -348,96 +531,171 @@ function check1CampusPageStatus() {
   return result;
 }
 
-// 1Campus：點「學習週曆」卡
+// 1Campus：智能搜尋並點擊「學習週曆」卡
 function clickLearningCalendarCard() {
-  console.log("[ClassSync Click] 開始搜尋「學習週曆」相關元素...");
+  console.log("[ClassSync Click] 開始智能搜尋「學習週曆」相關元素...");
 
-  // 記錄當前頁面 URL
-  console.log("[ClassSync Click] 當前頁面 URL:", window.location.href);
+  // 記錄當前頁面URL和基本狀態
+  console.log("[ClassSync Click] 當前頁面URL:", window.location.href);
+  console.log("[ClassSync Click] 頁面載入狀態:", document.readyState);
 
-  // 方法 1: 尋找有 alt="學習週曆" 的圖片
-  const img = document.querySelector('img[alt="學習週曆"]');
-  console.log("[ClassSync Click] 搜尋 img[alt=\"學習週曆\"]:", img ? "找到" : "未找到");
+  // 等待DOM穩定（防止元素還在動態載入）
+  const startTime = Date.now();
 
-  if (img) {
-    console.log("[ClassSync Click] 圖片元素:", {
-      src: img.src,
-      alt: img.alt,
-      parent: img.parentElement?.tagName
-    });
+  // 優先級搜尋策略
+  const searchStrategies = [
+    // 策略1: 精確匹配圖片alt屬性
+    () => {
+      const img = document.querySelector('img[alt="學習週曆"]');
+      if (img) {
+        const clickable = img.closest('[role="button"], a, button, div[onclick], [data-click], .clickable, .card, .item, .tile');
+        if (clickable && clickable.offsetWidth > 0 && clickable.offsetHeight > 0) {
+          console.log("[ClassSync Click] ✅ 策略1成功: 找到學習週曆圖片的可點擊父元素");
+          return clickable;
+        }
+        // 如果父元素不可點擊，嘗試點擊圖片本身
+        if (img.offsetWidth > 0 && img.offsetHeight > 0) {
+          console.log("[ClassSync Click] ✅ 策略1備用: 直接點擊學習週曆圖片");
+          return img;
+        }
+      }
+      return null;
+    },
 
-    const btn = img.closest('[role="button"],a,button,div[role="link"]');
-    console.log("[ClassSync Click] 圖片的可點擊父元素:", btn ? {
-      tagName: btn.tagName,
-      href: btn.href,
-      onclick: btn.onclick ? "有" : "無",
-      role: btn.getAttribute('role'),
-      classList: Array.from(btn.classList)
-    } : "未找到");
+    // 策略2: 文字內容精確匹配
+    () => {
+      const textElements = Array.from(document.querySelectorAll('a, button, [role="button"], div, span'));
+      const exactMatch = textElements.find(el => {
+        const text = (el.textContent || "").trim();
+        return text === "學習週曆" && el.offsetWidth > 0 && el.offsetHeight > 0;
+      });
+      if (exactMatch) {
+        console.log("[ClassSync Click] ✅ 策略2成功: 找到精確文字匹配的元素");
+        return exactMatch;
+      }
+      return null;
+    },
 
-    if (btn) {
-      console.log("[ClassSync Click] 即將點擊圖片的父元素");
-      btn.click();
+    // 策略3: 文字內容包含匹配
+    () => {
+      const clickableElements = Array.from(document.querySelectorAll(
+        'a, button, [role="button"], div[onclick], [data-click], .card, .item, .tile, .btn, .clickable'
+      ));
+      const textMatch = clickableElements.find(el => {
+        const text = (el.textContent || "").trim();
+        return text.includes("學習週曆") && el.offsetWidth > 0 && el.offsetHeight > 0;
+      });
+      if (textMatch) {
+        console.log("[ClassSync Click] ✅ 策略3成功: 找到包含學習週曆文字的可點擊元素");
+        return textMatch;
+      }
+      return null;
+    },
 
-      // 檢查點擊後的狀態
-      setTimeout(() => {
-        console.log("[ClassSync Click] 點擊後 URL:", window.location.href);
-      }, 100);
+    // 策略4: 部分文字匹配（學習、週曆）
+    () => {
+      const clickableElements = Array.from(document.querySelectorAll(
+        'a, button, [role="button"], div[onclick], [data-click], .card, .item, .tile, .btn'
+      ));
+      const partialMatch = clickableElements.find(el => {
+        const text = (el.textContent || "").trim().toLowerCase();
+        return (text.includes("學習") || text.includes("週曆") || text.includes("calendar"))
+               && el.offsetWidth > 0 && el.offsetHeight > 0;
+      });
+      if (partialMatch) {
+        console.log("[ClassSync Click] ✅ 策略4成功: 找到部分匹配的元素");
+        return partialMatch;
+      }
+      return null;
+    },
 
-      return true;
+    // 策略5: 深度搜尋所有可能的學習相關元素
+    () => {
+      const allElements = Array.from(document.querySelectorAll('*'));
+      const candidates = allElements.filter(el => {
+        const text = (el.textContent || "").toLowerCase();
+        const hasKeywords = text.includes("學習") || text.includes("週曆") ||
+                           text.includes("calendar") || text.includes("learning");
+        const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0;
+        const isClickable = el.tagName === 'A' || el.tagName === 'BUTTON' ||
+                           el.getAttribute('role') === 'button' ||
+                           el.onclick || el.getAttribute('data-click') ||
+                           el.classList.contains('clickable') ||
+                           el.classList.contains('card') ||
+                           el.classList.contains('btn');
+        return hasKeywords && isVisible && isClickable;
+      });
+
+      // 優先選擇最可能的候選
+      const bestCandidate = candidates.find(el => {
+        const text = (el.textContent || "").toLowerCase();
+        return text.includes("學習") && text.includes("週曆");
+      }) || candidates[0];
+
+      if (bestCandidate) {
+        console.log("[ClassSync Click] ✅ 策略5成功: 深度搜尋找到候選元素");
+        return bestCandidate;
+      }
+      return null;
+    }
+  ];
+
+  // 依序嘗試各種策略
+  for (let i = 0; i < searchStrategies.length; i++) {
+    try {
+      const element = searchStrategies[i]();
+      if (element) {
+        console.log(`[ClassSync Click] 使用策略${i + 1}找到目標元素:`, {
+          tagName: element.tagName,
+          textContent: element.textContent?.trim().substring(0, 100),
+          classList: Array.from(element.classList).slice(0, 5),
+          href: element.href,
+          onclick: !!element.onclick
+        });
+
+        // 嘗試點擊
+        try {
+          element.click();
+          console.log(`[ClassSync Click] ✅ 成功點擊元素 (策略${i + 1})`);
+
+          // 檢查點擊效果
+          setTimeout(() => {
+            console.log("[ClassSync Click] 點擊後URL:", window.location.href);
+          }, 200);
+
+          return true;
+        } catch (clickError) {
+          console.warn(`[ClassSync Click] ⚠️ 策略${i + 1}點擊失敗:`, clickError.message);
+          continue;
+        }
+      }
+    } catch (strategyError) {
+      console.warn(`[ClassSync Click] ⚠️ 策略${i + 1}執行失敗:`, strategyError.message);
+      continue;
     }
   }
 
-  // 方法 2: 尋找包含「學習週曆」文字的元素
-  console.log("[ClassSync Click] 嘗試方法 2: 搜尋包含「學習週曆」文字的元素");
-  const nodes = Array.from(document.querySelectorAll('[role="button"], a, button, div'));
-  console.log("[ClassSync Click] 找到", nodes.length, "個可能的按鈕/連結元素");
+  // 如果所有策略都失敗，提供詳細的診斷資訊
+  console.error("[ClassSync Click] ❌ 所有搜尋策略都失敗");
 
-  const textNodes = nodes.filter(el => (el.textContent || "").trim().includes("學習週曆"));
-  console.log("[ClassSync Click] 其中包含「學習週曆」文字的有", textNodes.length, "個");
+  // 診斷資訊
+  const diagnostics = {
+    totalElements: document.querySelectorAll('*').length,
+    buttons: document.querySelectorAll('button').length,
+    links: document.querySelectorAll('a').length,
+    clickableElements: document.querySelectorAll('[role="button"], [onclick], [data-click]').length,
+    imagesWithAlt: document.querySelectorAll('img[alt]').length,
+    hasLearningText: !!Array.from(document.querySelectorAll('*')).find(el =>
+      el.textContent?.includes("學習")
+    ),
+    hasCalendarText: !!Array.from(document.querySelectorAll('*')).find(el =>
+      el.textContent?.includes("週曆")
+    ),
+    searchTime: Date.now() - startTime
+  };
 
-  textNodes.forEach((node, index) => {
-    console.log(`[ClassSync Click] 文字節點 ${index + 1}:`, {
-      tagName: node.tagName,
-      textContent: node.textContent?.trim(),
-      href: node.href,
-      onclick: node.onclick ? "有" : "無",
-      classList: Array.from(node.classList)
-    });
-  });
+  console.log("[ClassSync Click] 診斷資訊:", diagnostics);
 
-  const hit = textNodes[0];
-  if (hit) {
-    console.log("[ClassSync Click] 即將點擊文字元素:", hit.tagName);
-    hit.click();
-
-    // 檢查點擊後的狀態
-    setTimeout(() => {
-      console.log("[ClassSync Click] 點擊後 URL:", window.location.href);
-    }, 100);
-
-    return true;
-  }
-
-  // 方法 3: 更廣泛的搜尋
-  console.log("[ClassSync Click] 嘗試方法 3: 廣泛搜尋所有可能相關的元素");
-  const allElements = Array.from(document.querySelectorAll('*'));
-  const weeklyElements = allElements.filter(el => {
-    const text = el.textContent?.toLowerCase() || "";
-    return text.includes("學習") || text.includes("週曆") || text.includes("calendar") || text.includes("weekly");
-  });
-
-  console.log("[ClassSync Click] 找到可能相關的元素", weeklyElements.length, "個");
-  weeklyElements.slice(0, 5).forEach((el, index) => {
-    console.log(`[ClassSync Click] 相關元素 ${index + 1}:`, {
-      tagName: el.tagName,
-      textContent: el.textContent?.trim().substring(0, 50),
-      href: el.href,
-      classList: Array.from(el.classList).slice(0, 3)
-    });
-  });
-
-  console.log("[ClassSync Click] ❌ 無法找到「學習週曆」相關的可點擊元素");
   return false;
 }
 
@@ -1080,16 +1338,34 @@ async function waitForSubmissionResult(tabId, maxAttempts = 20, interval = 500) 
 // ========= 5) 主流程：使用 payload 自動化 =========
 async function startFlow() {
   console.log("[ClassSync] 🚀 開始執行自動化流程");
-  const payload = await resolvePayload();
-  console.log("[ClassSync] 使用的 payload:", payload);
 
-  // 1) 打開/切到 1Campus
-  console.log("[ClassSync] 步驟 1: 打開或切換到 1Campus");
-  const tabId = await openOrFocus(ONECAMPUS);
-  console.log("[ClassSync] 1Campus 分頁 ID:", tabId);
+  try {
+    const payload = await resolvePayload();
+    console.log("[ClassSync] 使用的 payload:", payload);
 
-  // 2) 先檢查頁面狀態
-  console.log("[ClassSync] 步驟 2a: 檢查 1Campus 頁面狀態");
+    // 通知 UI 有新資料
+    notifyUI('DATA_RECEIVED', { data: payload });
+
+    // 1) 打開/切到 1Campus
+    console.log("[ClassSync] 步驟 1: 打開或切換到 1Campus");
+    updateUIStep(0, 'running');
+    const tabId = await openOrFocus(ONECAMPUS);
+    console.log("[ClassSync] 1Campus 分頁 ID:", tabId);
+    updateUIStep(0, 'completed');
+
+  // 2) 智能等待 1Campus 頁面完全載入
+  console.log("[ClassSync] 步驟 2a: 智能等待 1Campus 頁面完全載入");
+  const pageReady = await waitFor1CampusReady(tabId, 50, 1000);
+
+  if (!pageReady.ready) {
+    console.error("[ClassSync] ❌ 1Campus 頁面載入超時:", pageReady.reason);
+    updateUIStep(1, 'error', '頁面載入超時');
+    throw new Error(`1Campus 頁面載入失敗: ${pageReady.reason}`);
+  }
+
+  console.log("[ClassSync] ✅ 1Campus 頁面已完全載入:", pageReady);
+
+  // 額外檢查頁面狀態
   let pageStatus = null;
   try {
     const [{ result }] = await chrome.scripting.executeScript({
@@ -1098,26 +1374,24 @@ async function startFlow() {
       args: []
     });
     pageStatus = result;
-    console.log("[ClassSync] 頁面狀態:", pageStatus);
+    console.log("[ClassSync] 頁面狀態檢查:", pageStatus);
 
     if (pageStatus.isLoginPage) {
       console.error("[ClassSync] ❌ 檢測到登入頁面，請先手動登入");
-      return;
+      updateUIStep(1, 'error', '需要登入');
+      throw new Error("檢測到登入頁面，請先手動登入");
     }
 
     if (pageStatus.hasError) {
       console.error("[ClassSync] ❌ 頁面有錯誤訊息:", pageStatus.errorMessage);
     }
-
-    if (!pageStatus.hasLearningCalendar) {
-      console.warn("[ClassSync] ⚠️ 未檢測到「學習週曆」相關元素");
-    }
   } catch (e) {
     console.error("[ClassSync] 檢查頁面狀態失敗:", e);
   }
 
-  // 2b) 點「學習週曆」卡（重試數次以因應 SPA）
-  console.log("[ClassSync] 步驟 2b: 尋找並點擊「學習週曆」卡");
+  // 2b) 智能搜尋並點擊「學習週曆」卡
+  console.log("[ClassSync] 步驟 2b: 智能搜尋並點擊「學習週曆」卡");
+  updateUIStep(1, 'running');
   let clicked = false;
   let currentUrl = null;
 
@@ -1130,8 +1404,17 @@ async function startFlow() {
     console.error("[ClassSync] 無法獲取當前 URL:", e);
   }
 
-  for (let i = 0; i < 15; i++) {
+  // 改進的重試機制：更少但更智能的嘗試
+  const maxClickAttempts = 8;
+  for (let i = 0; i < maxClickAttempts; i++) {
+    console.log(`[ClassSync] 嘗試點擊「學習週曆」第 ${i+1}/${maxClickAttempts} 次`);
+
     try {
+      // 每次嘗試前稍微等待，讓頁面穩定
+      if (i > 0) {
+        await sleep(1000 + i * 200); // 遞增等待時間
+      }
+
       const [{ result }] = await chrome.scripting.executeScript({
         target: { tabId },
         func: clickLearningCalendarCard,
@@ -1141,9 +1424,10 @@ async function startFlow() {
       if (result) {
         clicked = true;
         console.log("[ClassSync] ✅ 成功點擊「學習週曆」卡");
+        updateUIStep(1, 'completed');
 
-        // 等待一下再檢查是否有 URL 變化
-        await sleep(1000);
+        // 等待並檢查 URL 變化
+        await sleep(1500);
         const tab = await chrome.tabs.get(tabId);
         if (tab.url !== currentUrl) {
           console.log("[ClassSync] ✅ 檢測到 URL 變化:", tab.url);
@@ -1151,20 +1435,39 @@ async function startFlow() {
           console.warn("[ClassSync] ⚠️ 點擊後 URL 未變化，可能需要額外步驟");
         }
         break;
+      } else {
+        console.log(`[ClassSync] 第 ${i+1} 次嘗試未找到「學習週曆」元素`);
+
+        // 如果前幾次嘗試失敗，檢查頁面是否還在載入
+        if (i < 3) {
+          const [{ result: loadingCheck }] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+              const hasLoading = !!document.querySelector('.loading, .spinner, [data-loading]');
+              const readyState = document.readyState;
+              const elementCount = document.querySelectorAll('*').length;
+              return { hasLoading, readyState, elementCount };
+            },
+            args: []
+          });
+          console.log(`[ClassSync] 頁面載入檢查 (嘗試${i+1}):`, loadingCheck);
+        }
       }
     } catch (e) {
-      console.log(`[ClassSync] 嘗試點擊「學習週曆」第 ${i+1} 次失敗:`, e.message);
-      await sleep(400);
+      console.log(`[ClassSync] 嘗試點擊「學習週曆」第 ${i+1} 次發生錯誤:`, e.message);
     }
   }
 
   if (!clicked) {
     console.error("[ClassSync] ❌ 無法找到或點擊「學習週曆」卡");
     console.log("[ClassSync] 💡 建議：請檢查頁面是否已載入完成，或嘗試手動點擊一次");
+    updateUIStep(1, 'error', '點擊學習週曆失敗');
+    throw new Error("無法點擊學習週曆卡");
   }
 
   // 3) 監控新分頁的創建（tschoolkit 會在新分頁開啟）
   console.log("[ClassSync] 步驟 3: 監控新分頁創建，等待 tschoolkit...");
+  updateUIStep(2, 'running');
 
   const onTabCreated = async (tab) => {
     console.log(`[ClassSync Monitor] 新分頁被創建: ${tab.url || '(URL未知)'}`);
@@ -1172,6 +1475,7 @@ async function startFlow() {
     // 檢查是否是 tschoolkit 相關的分頁
     if (tab.url && tab.url.startsWith(TSKIT)) {
       console.log(`[ClassSync Monitor] ✅ 檢測到 tschoolkit 新分頁: ${tab.id}`);
+      updateUIStep(2, 'completed');
       chrome.tabs.onCreated.removeListener(onTabCreated);
 
       // 等待新分頁載入完成
@@ -1210,6 +1514,7 @@ async function startFlow() {
 
           if (changeInfo.url.startsWith(TSKIT)) {
             console.log(`[ClassSync Monitor] ✅ 檢測到 tschoolkit URL: ${tab.id}`);
+            updateUIStep(2, 'completed');
             chrome.tabs.onCreated.removeListener(onTabCreated);
             chrome.tabs.onUpdated.removeListener(onTabUpdated);
 
@@ -1278,7 +1583,16 @@ async function startFlow() {
   setTimeout(() => {
     console.error("[ClassSync Monitor] ❌ 等待 tschoolkit 新分頁超時 (30秒)");
     chrome.tabs.onCreated.removeListener(onTabCreated);
+    uiState.isRunning = false;
+    notifyUI('PROCESS_ERROR', { error: '等待 tschoolkit 新分頁超時', step: 2 });
   }, 30000);
+
+  } catch (error) {
+    console.error("[ClassSync] 主流程執行失敗:", error);
+    uiState.isRunning = false;
+    notifyUI('PROCESS_ERROR', { error: error.message, step: uiState.currentStep });
+    throw error;
+  }
 }
 
 // 執行 tschoolkit 網站的自動化流程
@@ -1304,6 +1618,7 @@ async function executeTschoolkitFlow(tabId) {
 
   // 4) 等待頁面載入並點「待填下週」
   console.log("[ClassSync] 步驟 4: 等待頁面載入並點擊「待填下週」標籤");
+  updateUIStep(3, 'running');
 
   // 先等待標籤元素出現
   const tabElementReady = await waitForElement(tabId, 'a.tab, button.tab, [role="tab"]', 20, 400);
@@ -1324,6 +1639,7 @@ async function executeTschoolkitFlow(tabId) {
       if (result) {
         tabClicked = true;
         console.log("[ClassSync] ✅ 成功點擊「待填下週」標籤");
+        updateUIStep(3, 'completed');
 
         // 等待標籤切換完成
         await sleep(500);
@@ -1343,6 +1659,7 @@ async function executeTschoolkitFlow(tabId) {
 
   // 5) 等待並點「週曆填報」
   console.log("[ClassSync] 步驟 5: 等待並點擊「週曆填報」按鈕");
+  updateUIStep(4, 'running');
 
   // 等待按鈕元素出現
   const buttonElementReady = await waitForElement(tabId, 'button, a, [role="button"]', 15, 400);
@@ -1363,6 +1680,7 @@ async function executeTschoolkitFlow(tabId) {
       if (result) {
         reportClicked = true;
         console.log("[ClassSync] ✅ 成功點擊「週曆填報」按鈕");
+        updateUIStep(4, 'completed');
         break;
       }
     }
@@ -1379,6 +1697,7 @@ async function executeTschoolkitFlow(tabId) {
 
   // 6) 等待 Modal 完全載入並填寫表單
   console.log("[ClassSync] 步驟 6: 等待 Modal 完全載入並填寫表單...");
+  updateUIStep(5, 'running');
 
   // 使用智能等待確保 Modal 完全準備就緒
   const modalReady = await waitForModalReady(tabId, 15, 500);
@@ -1515,6 +1834,7 @@ async function executeTschoolkitFlow(tabId) {
       // 如果填寫成功或達到可接受的成功率，則跳出循環
       if (result.ok || result.successRate >= 0.8) {
         console.log(`[ClassSync] ✅ 表單填寫完成，成功率: ${(result.successRate * 100).toFixed(1)}%`);
+        updateUIStep(5, 'completed');
         break;
       }
 
@@ -1561,6 +1881,7 @@ async function executeTschoolkitFlow(tabId) {
 
   // 7) 提交表單並等待確認
   console.log("[ClassSync] 步驟 7: 提交表單並等待確認");
+  updateUIStep(6, 'running');
 
   let submitResult = null;
   let submitAttempts = 0;
@@ -1615,6 +1936,9 @@ async function executeTschoolkitFlow(tabId) {
 
   if (submissionResult.success) {
     console.log("[ClassSync] 🎉 表單提交成功！自動化流程完成！");
+    updateUIStep(6, 'completed');
+    uiState.isRunning = false;
+    notifyUI('PROCESS_COMPLETED', { success: true, data: payload });
     if (submissionResult.successMessage) {
       console.log(`[ClassSync] ✅ 成功訊息: "${submissionResult.successMessage}"`);
     }
@@ -1623,9 +1947,15 @@ async function executeTschoolkitFlow(tabId) {
     }
   } else if (submissionResult.errorMessage) {
     console.error(`[ClassSync] ❌ 提交失敗: ${submissionResult.errorMessage}`);
+    updateUIStep(6, 'error', '提交失敗');
+    uiState.isRunning = false;
+    notifyUI('PROCESS_ERROR', { error: submissionResult.errorMessage, step: 6 });
     throw new Error(`Submission failed: ${submissionResult.errorMessage}`);
   } else {
     console.warn("[ClassSync] ⚠️ 提交狀態不明確，但流程已完成");
+    updateUIStep(6, 'completed');
+    uiState.isRunning = false;
+    notifyUI('PROCESS_COMPLETED', { success: true, data: payload });
     console.log("[ClassSync] 📋 狀態資訊:", {
       modalClosed: submissionResult.modalClosed,
       url: submissionResult.currentUrl,
@@ -1667,5 +1997,13 @@ async function executeTschoolkitFlow(tabId) {
 // 點擴充圖示就跑（若未接到外部 payload，會自動用 DUMMY）
 chrome.action.onClicked.addListener(() => {
   console.log("[ClassSync] 📱 擴充功能圖示被點擊，開始執行...");
-  startFlow().catch(console.error);
+  if (!uiState.isRunning) {
+    uiState.isRunning = true;
+    notifyUI('PROCESS_STARTED');
+    startFlow().catch(error => {
+      console.error("[ClassSync] 點擊圖示執行失敗:", error);
+      uiState.isRunning = false;
+      notifyUI('PROCESS_ERROR', { error: error.message });
+    });
+  }
 });

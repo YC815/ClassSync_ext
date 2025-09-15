@@ -31,7 +31,8 @@
         ]
     },
     "action": {
-        "default_title": "一鍵填寫學習週曆"
+        "default_title": "一鍵填寫學習週曆",
+        "default_popup": "popup.html"
     },
     "background": {
         "service_worker": "background.js"
