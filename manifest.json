@@ -1,45 +1,48 @@
 {
-    "manifest_version": 3,
-    "name": "ClassSync 一鍵填寫學習週曆",
-    "version": "0.2.0",
-    "description": "已登入 1Campus 後，一鍵自動開啟並填寫學習週曆。支援外部資料注入。",
-    "permissions": [
-        "tabs",
-        "scripting",
-        "storage"
-    ],
-    "host_permissions": [
-        "https://app.1campus.net/*",
-        "https://tschoolkit.web.app/*"
-    ],
-    "content_scripts": [
-        {
-            "matches": [
-                "<all_urls>"
-            ],
-            "js": [
-                "src/content/bridge.js"
-            ],
-            "run_at": "document_start"
-        }
-    ],
-    "externally_connectable": {
-        "matches": [
-            "https://*.example.com/*",
-            "http://localhost:*/*",
-            "https://localhost:*/*"
-        ]
-    },
-    "action": {
-        "default_title": "一鍵填寫學習週曆",
-        "default_popup": "src/ui/index.html"
-    },
-    "background": {
-        "service_worker": "src/background/index.js",
-        "type": "module"
-    },
-    "options_ui": {
-        "page": "src/options/index.html",
-        "open_in_tab": true
+  "manifest_version": 3,
+  "name": "ClassSync - 一鍵填報週曆",
+  "version": "1.0.0",
+  "description": "自動填報 tschoolkit 週曆的 Chrome 擴充功能",
+
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+
+  "host_permissions": [
+    "https://tschoolkit.web.app/*",
+    "https://asia-east1-campus-lite.cloudfunctions.net/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://tschoolkit.web.app/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
     }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["page-inject.js"],
+      "matches": ["https://tschoolkit.web.app/*"]
+    }
+  ],
+
+  "action": {
+    "default_title": "ClassSync - 填報週曆",
+    "default_popup": "popup.html"
+  },
+
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
 }
