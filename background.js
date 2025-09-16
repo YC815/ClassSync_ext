@@ -1,6 +1,11 @@
 // background.js - 服務工作者，處理 API 調用和主要邏輯
 console.log('[ClassSync] background.js 載入');
 
+// 初始化設定
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('[ClassSync] 擴充功能已安裝');
+});
+
 // API 端點
 const TSCHOOL_API = 'https://asia-east1-campus-lite.cloudfunctions.net/tschool/setCalendar';
 
@@ -50,13 +55,17 @@ function calculateWeekNumber(date = new Date()) {
   return weekNumber;
 }
 
-// 獲取當週一的日期
-function getMondayOfWeek(date = new Date()) {
+// 獲取下週一的日期
+function getNextMondayOfWeek(date = new Date()) {
   const d = new Date(date);
   const dayOfWeek = d.getDay();
   const diff = d.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1); // 調整到週一
   const monday = new Date(d.setDate(diff));
-  console.log('[ClassSync] 當週週一:', monday.toISOString().split('T')[0]);
+
+  // 加 7 天得到下週一
+  monday.setDate(monday.getDate() + 7);
+
+  console.log('[ClassSync] 下週週一:', monday.toISOString().split('T')[0]);
   return monday;
 }
 
@@ -67,10 +76,10 @@ async function submitCalendar(idToken, userData = {}) {
   console.log('[ClassSync] 用戶資料:', userData);
 
   try {
-    // 計算當週資料
-    const monday = getMondayOfWeek();
-    const weekNumber = calculateWeekNumber();
-    const weeklySchedule = generateWeeklySchedule(monday);
+    // 計算下週資料
+    const nextMonday = getNextMondayOfWeek();
+    const weekNumber = calculateWeekNumber(nextMonday);
+    const weeklySchedule = generateWeeklySchedule(nextMonday);
 
     // 構建 API payload（根據分析的 API 格式）
     const payload = {
@@ -86,7 +95,7 @@ async function submitCalendar(idToken, userData = {}) {
 
         // 時間相關
         deadline: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19), // 一週後
-        begin: monday.toISOString().replace('T', ' ').substring(0, 19),
+        begin: nextMonday.toISOString().replace('T', ' ').substring(0, 19),
         timestamp: Date.now(),
 
         // 週曆資料
@@ -146,33 +155,20 @@ async function submitCalendar(idToken, userData = {}) {
   }
 }
 
-// 處理擴充功能圖標點擊
-chrome.action.onClicked.addListener(async (tab) => {
-  console.log('[ClassSync] === 擴充功能被點擊 ===');
-  console.log('[ClassSync] 當前 tab:', {
-    url: tab.url,
-    title: tab.title,
-    id: tab.id
-  });
 
-  // 檢查是否在正確的網站
-  if (!tab.url.includes('tschoolkit.web.app')) {
-    console.log('[ClassSync] 不在 tschoolkit.web.app，開啟正確網站');
-    chrome.tabs.create({ url: 'https://tschoolkit.web.app' });
-    return;
-  }
+// 執行填報流程的函數（從原來的 action.onClicked 邏輯移過來）
+async function executeFillProcess(tabId) {
+  console.log('[ClassSync] === 開始執行填報流程 ===');
 
   try {
-    console.log('[ClassSync] 開始執行主要流程');
-
     // 1. 獲取頁面信息
     console.log('[ClassSync] 步驟 1: 獲取頁面信息');
-    const pageInfoResponse = await chrome.tabs.sendMessage(tab.id, { action: 'GET_PAGE_INFO' });
+    const pageInfoResponse = await chrome.tabs.sendMessage(tabId, { action: 'GET_PAGE_INFO' });
     console.log('[ClassSync] 頁面信息回應:', pageInfoResponse);
 
     // 2. 獲取 idToken
     console.log('[ClassSync] 步驟 2: 獲取 idToken');
-    const tokenResponse = await chrome.tabs.sendMessage(tab.id, { action: 'GET_ID_TOKEN' });
+    const tokenResponse = await chrome.tabs.sendMessage(tabId, { action: 'GET_ID_TOKEN' });
     console.log('[ClassSync] Token 回應:', {
       success: tokenResponse?.success,
       hasToken: !!tokenResponse?.idToken,
@@ -184,11 +180,11 @@ chrome.action.onClicked.addListener(async (tab) => {
 
       // 嘗試刷新 token
       console.log('[ClassSync] 嘗試刷新 token');
-      await chrome.tabs.sendMessage(tab.id, { action: 'REFRESH_TOKEN' });
+      await chrome.tabs.sendMessage(tabId, { action: 'REFRESH_TOKEN' });
 
       // 等待一下再重試
       await new Promise(resolve => setTimeout(resolve, 2000));
-      const retryTokenResponse = await chrome.tabs.sendMessage(tab.id, { action: 'GET_ID_TOKEN' });
+      const retryTokenResponse = await chrome.tabs.sendMessage(tabId, { action: 'GET_ID_TOKEN' });
 
       if (!retryTokenResponse?.success || !retryTokenResponse?.idToken) {
         throw new Error('無法獲取有效的 idToken，請確保已登入 tschoolkit.web.app');
@@ -206,11 +202,11 @@ chrome.action.onClicked.addListener(async (tab) => {
 
     console.log('[ClassSync] 提交結果:', submitResult);
 
-    // 4. 顯示結果給用戶（這裡可以用 notification 或其他方式）
+    // 4. 顯示結果
     if (submitResult.success) {
       console.log('[ClassSync] ✅ 週曆提交成功！');
 
-      // 可以加入 chrome.notifications 來通知用戶
+      // 通知用戶
       if (chrome.notifications) {
         chrome.notifications.create({
           type: 'basic',
@@ -219,6 +215,7 @@ chrome.action.onClicked.addListener(async (tab) => {
           message: '週曆提交成功！'
         });
       }
+      return { success: true };
     } else {
       console.error('[ClassSync] ❌ 週曆提交失敗:', submitResult.error);
 
@@ -230,6 +227,7 @@ chrome.action.onClicked.addListener(async (tab) => {
           message: `週曆提交失敗: ${submitResult.error}`
         });
       }
+      return { success: false, error: submitResult.error };
     }
 
   } catch (error) {
@@ -243,14 +241,59 @@ chrome.action.onClicked.addListener(async (tab) => {
         message: `執行失敗: ${error.message}`
       });
     }
+    return { success: false, error: error.message };
   }
-});
+}
 
 // 監聽來自其他腳本的訊息
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[ClassSync] background 收到訊息:', message, '來自:', sender);
 
-  // 這裡可以加入其他的訊息處理邏輯
+  // 處理浮動UI的填報請求
+  if (message.action === 'START_FILL_PROCESS_FROM_UI') {
+    console.log('[ClassSync] 處理浮動UI的填報請求');
+
+    // 獲取當前活動的tab
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0] && tabs[0].url && tabs[0].url.includes('tschoolkit.web.app')) {
+        // 執行填報流程
+        executeFillProcess(tabs[0].id)
+          .then(result => {
+            console.log('[ClassSync] 填報流程完成:', result);
+            sendResponse(result);
+          })
+          .catch(error => {
+            console.error('[ClassSync] 填報流程失敗:', error);
+            sendResponse({ success: false, error: error.message });
+          });
+      } else {
+        console.error('[ClassSync] 不在正確的網站上');
+        sendResponse({ success: false, error: '請確保在 tschoolkit.web.app 網站上' });
+      }
+    });
+
+    // 返回 true 表示異步回應
+    return true;
+  }
+
+  // 處理帶有tabId的填報請求（向後兼容）
+  if (message.action === 'START_FILL_PROCESS' && message.tabId) {
+    console.log('[ClassSync] 處理指定tab的填報請求');
+
+    // 執行填報流程
+    executeFillProcess(message.tabId)
+      .then(result => {
+        console.log('[ClassSync] 填報流程完成:', result);
+        sendResponse(result);
+      })
+      .catch(error => {
+        console.error('[ClassSync] 填報流程失敗:', error);
+        sendResponse({ success: false, error: error.message });
+      });
+
+    // 返回 true 表示異步回應
+    return true;
+  }
 
   sendResponse({ received: true });
 });

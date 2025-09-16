@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 300px;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+    }
+    .title {
+      font-size: 16px;
+      font-weight: bold;
+      margin-bottom: 10px;
+      color: #333;
+    }
+    .description {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 15px;
+    }
+    .button {
+      background: #4CAF50;
+      border: none;
+      color: white;
+      padding: 10px 20px;
+      text-align: center;
+      text-decoration: none;
+      display: inline-block;
+      font-size: 14px;
+      margin: 4px 2px;
+      cursor: pointer;
+      border-radius: 4px;
+      width: 100%;
+    }
+    .button:hover {
+      background: #45a049;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">ClassSync - 一鍵填報週曆</div>
+  <div class="description">自動填報 tschoolkit 週曆的工具</div>
+  <button class="button" id="fillButton">開始填報</button>
+
+  <script>
+    document.getElementById('fillButton').addEventListener('click', async () => {
+      console.log('[ClassSync Popup] 填報按鈕被點擊');
+
+      const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+
+      if (tab.url && tab.url.includes('tschoolkit.web.app')) {
+        try {
+          const response = await chrome.runtime.sendMessage({
+            action: 'START_FILL_PROCESS',
+            tabId: tab.id
+          });
+
+          if (response && response.success) {
+            alert('週曆提交成功！');
+            window.close();
+          } else {
+            alert(`週曆提交失敗: ${response?.error || '未知錯誤'}`);
+          }
+        } catch (error) {
+          console.error('[ClassSync Popup] 執行失敗:', error);
+          alert(`執行失敗: ${error.message}`);
+        }
+      } else {
+        alert('請先開啟 tschoolkit.web.app 頁面');
+      }
+    });
+  </script>
+</body>
+</html>
