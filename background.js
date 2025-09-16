@@ -13,15 +13,16 @@ const TSKIT = "https://tschoolkit.web.app";
 // ========= 1) 資料 Schema 與預設 DUMMY =========
 // 固定 Schema：未來你的 Web APP 就照這個傳
 // slots[0] 對應當天第一個 select，slots[1] 對應第二個 select
+// 自訂地點使用 { location: "其他地點", customName: "地點名稱" } 格式
 const DUMMY_PAYLOAD = {
   version: "1.0",
   weekStartISO: "2025-09-22",  // 週一
   days: [
     { dateISO: "2025-09-22", slots: ["吉林基地", "在家中"] },
     { dateISO: "2025-09-23", slots: ["弘道基地", "在家中"] },
-    { dateISO: "2025-09-24", slots: ["在家中", "其他地點:實習公司"] }, // 支持自定義地點格式
+    { dateISO: "2025-09-24", slots: ["在家中", { location: "其他地點", customName: "實習公司" }] },
     { dateISO: "2025-09-25", slots: ["吉林基地", "弘道基地"] },
-    { dateISO: "2025-09-26", slots: ["其他地點:圖書館", "在家中"] } // 另一個自定義地點範例
+    { dateISO: "2025-09-26", slots: [{ location: "其他地點", customName: "圖書館" }, "在家中"] }
   ],
   // 可選：預期下拉可接受的字串集合，用來校驗/容錯
   placeWhitelist: ["弘道基地", "吉林基地", "在家中", "其他地點"]
@@ -326,17 +327,7 @@ let latestPayloadMem = null;
 
 // ========= UI 狀態管理 =========
 let uiState = {
-  isRunning: false,
-  currentStep: 0,
-  steps: [
-    '開啟 1Campus',
-    '點擊學習週曆',
-    '切換到 tschoolkit',
-    '點擊待填下週',
-    '開啟週曆填報',
-    '自動填寫表單',
-    '提交完成'
-  ]
+  isRunning: false
 };
 
 // 向所有 popup 發送狀態更新
@@ -347,16 +338,6 @@ function notifyUI(type, data = {}) {
   // 嘗試發送到所有可能的 popup
   chrome.runtime.sendMessage(message).catch(e => {
     console.log(`[ClassSync UI] UI 通知失敗 (正常，可能沒有打開 popup): ${e.message}`);
-  });
-}
-
-// 更新步驟狀態
-function updateUIStep(stepIndex, status, customText = null) {
-  uiState.currentStep = stepIndex;
-  notifyUI('STEP_UPDATE', {
-    step: stepIndex,
-    status: status,
-    text: customText
   });
 }
 
@@ -386,17 +367,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg?.type === "PING") {
     console.log("[ClassSync] 收到 UI ping");
-    sendResponse?.({ ok: true, isRunning: uiState.isRunning, currentStep: uiState.currentStep });
+    sendResponse?.({ ok: true, isRunning: uiState.isRunning });
     return true;
   }
 
   if (msg?.type === "CLASSSYNC_NEXT_WEEK_PAYLOAD") {
     console.log("[ClassSync] 收到外部 payload:", msg.payload);
     if (validatePayload(msg.payload)) {
-      console.log("[ClassSync] Payload 驗證通過，儲存並通知UI");
+      console.log("[ClassSync] Payload 驗證通過，儲存");
       latestPayloadMem = msg.payload;
       chrome.storage.session.set({ classsync_payload: latestPayloadMem });
-      notifyUI('DATA_RECEIVED', { data: latestPayloadMem });
       sendResponse?.({ ok: true });
       // 你可以選擇：收到資料就自動開跑
       if (!uiState.isRunning) {
@@ -457,13 +437,261 @@ async function resolvePayload() {
 function validatePayload(p) {
   if (!p || p.version !== "1.0") return false;
   if (!p.weekStartISO || !Array.isArray(p.days) || p.days.length === 0) return false;
+
   for (const d of p.days) {
     if (!d.dateISO || !Array.isArray(d.slots) || d.slots.length === 0) return false;
+
+    // 驗證每個 slot 的格式
+    for (const slot of d.slots) {
+      if (typeof slot === 'string') {
+        // 標準地點或舊格式的自訂地點（向後相容）
+        continue;
+      } else if (typeof slot === 'object' && slot !== null) {
+        // 新格式的自訂地點物件
+        if (!slot.location || typeof slot.location !== 'string') return false;
+        if (!slot.customName || typeof slot.customName !== 'string') return false;
+      } else {
+        // 無效格式
+        return false;
+      }
+    }
   }
   return true;
 }
 
-// ========= 4) 會被注入頁面的函式（序列化） =========
+// 標準化 slot 格式：將各種格式統一轉換為處理函數能理解的格式
+function normalizeSlot(slot) {
+  if (typeof slot === 'string') {
+    // 處理舊格式的自訂地點："其他地點:地點名稱"
+    if (slot.includes(':') && slot.startsWith('其他地點:')) {
+      const customName = slot.substring(5); // 移除 "其他地點:" 前綴（5個字符）
+      return {
+        location: "其他地點",
+        customName: customName.trim(),
+        isCustom: true
+      };
+    }
+    // 標準地點
+    return {
+      location: slot,
+      customName: null,
+      isCustom: false
+    };
+  } else if (typeof slot === 'object' && slot !== null && slot.location && slot.customName) {
+    // 新格式的自訂地點物件
+    return {
+      location: slot.location,
+      customName: slot.customName,
+      isCustom: true
+    };
+  }
+
+  // 無效格式，返回預設值
+  return {
+    location: "在家中",
+    customName: null,
+    isCustom: false
+  };
+}
+
+// ========= 4) 自訂地點處理函式 =========
+
+// 更穩健的可編輯判斷
+function isEditable(el) {
+  if (!el) return false;
+  const cs = window.getComputedStyle(el);
+  const visible = cs.display !== 'none' && cs.visibility !== 'hidden' && el.getClientRects().length > 0;
+  const enabled = !el.disabled && !el.readOnly && !el.hasAttribute('aria-disabled');
+  return visible && enabled;
+}
+
+// 以 MutationObserver + 兩次 rAF 等待「真的可編輯」
+function waitUntilEditable(targetEl, { timeout = 3000 } = {}) {
+  return new Promise((resolve) => {
+    if (isEditable(targetEl)) return resolve(true);
+
+    let done = false;
+    const stop = () => { if (!done) { done = true; obs.disconnect(); clearTimeout(tid); } };
+
+    const obs = new MutationObserver(async () => {
+      // 多等兩個 animation frame，確保 layout 與樣式完成
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      if (isEditable(targetEl)) { stop(); resolve(true); }
+    });
+
+    obs.observe(document.documentElement, { attributes: true, childList: true, subtree: true });
+
+    const tid = setTimeout(() => { stop(); resolve(false); }, timeout);
+  });
+}
+
+// 修復後的自定義地點填寫相關函數
+
+// 比原本「寬高>0」更穩定：看 computedStyle 與禁用態
+function isInputReady(input) {
+  if (!input) return false;
+  const cs = getComputedStyle(input);
+  const visible = cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+  return visible && !input.disabled && !input.readOnly;
+}
+
+// 用原生 setter 寫值，解決 React/受控輸入不同步
+function setNativeInputValue(input, value) {
+  // 使用 HTMLInputElement.prototype.value setter 確保跳過任何框架攔截
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+
+  if (nativeSetter) {
+    nativeSetter.call(input, value);
+  } else {
+    // 理論上不會走到這，但保底
+    input.value = value;
+  }
+
+  // 對受控元件，input 事件是關鍵
+  input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+}
+
+// 等待/取得該 slot 的自訂輸入框：優先用 MutationObserver，退而求其次輪詢
+function getOrWaitCustomInput(container, select, maxWaitMs = 3000) {
+  return new Promise((resolve) => {
+    // 先查一次
+    const q = () => container?.querySelector('input[type="text"], input[placeholder*="地點"], input[placeholder*="名稱"], input.input');
+    let found = q();
+    if (found) return resolve(found);
+
+    // 確保 select 已是「其他地點」
+    if (select && select.value !== '其他地點') {
+      select.value = '其他地點';
+      select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    }
+
+    // 用 MutationObserver 等待輸入框出現
+    const obs = new MutationObserver(() => {
+      const el = q();
+      if (el) {
+        obs.disconnect();
+        resolve(el);
+      }
+    });
+    if (container) {
+      obs.observe(container, { childList: true, subtree: true });
+    }
+
+    // 兜底 timeout
+    setTimeout(() => {
+      obs.disconnect();
+      resolve(q() || null);
+    }, maxWaitMs);
+  });
+}
+
+async function fillCustomLocation(container, customName, slotIndex) {
+  console.log(`測試填寫自訂地點: 時段 ${slotIndex + 1}, 地點: "${customName}"`);
+  try {
+    const select = container?.querySelector('select');
+
+    // 確保「其他地點」已選
+    if (select && select.value !== '其他地點') {
+      select.value = '其他地點';
+      select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    }
+
+    // 取得或等待 input
+    const input = await getOrWaitCustomInput(container, select, 3000);
+
+    if (!input) {
+      console.error(`時段 ${slotIndex + 1}: 找不到輸入框`);
+      return { success: false, reason: 'no-input', customLocationValue: null };
+    }
+
+    // 有些站點會短暫設為 readonly/disabled，這裡強制解除一次
+    input.disabled = false;
+    input.readOnly = false;
+
+    // 滾到可見（避免某些框架對不可見元素忽略事件）
+    input.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+
+    // 就算 isInputReady 回 false，也先試著填 — 很多時候其實能寫
+    input.focus();
+    setNativeInputValue(input, customName);
+    input.blur();
+
+    // 驗證
+    const ok = input.value === customName;
+    console.log(`時段 ${slotIndex + 1}: 自訂地點填寫 ${ok ? '✅' : '❌'} "${customName}" -> "${input.value}"`);
+    return { success: ok, reason: ok ? 'filled' : 'value-mismatch', customLocationValue: input.value };
+  } catch (err) {
+    console.error(`時段 ${slotIndex + 1}: 填寫時發生錯誤:`, err);
+    return { success: false, reason: 'fill-error', customLocationValue: null, error: err?.message };
+  }
+}
+
+
+// ========= 5) 錯誤處理與分類 =========
+
+// 將技術錯誤轉換為用戶友善的訊息
+function categorizeError(error) {
+  const message = error.message || error.toString();
+  const messageLower = message.toLowerCase();
+
+  let category = 'unknown';
+  let userMessage = '發生未知錯誤，請重試';
+  let suggestions = [];
+
+  if (messageLower.includes('login') || messageLower.includes('登入')) {
+    category = 'authentication';
+    userMessage = '需要登入 1Campus';
+    suggestions = ['請先登入 1Campus', '確認登入狀態正常'];
+  }
+  else if (messageLower.includes('page') || messageLower.includes('載入') || messageLower.includes('ready')) {
+    category = 'page_load';
+    userMessage = '頁面載入失敗';
+    suggestions = ['重新整理頁面', '檢查網路連線', '稍後重試'];
+  }
+  else if (messageLower.includes('click') || messageLower.includes('學習週曆') || messageLower.includes('element')) {
+    category = 'element_not_found';
+    userMessage = '找不到學習週曆按鈕';
+    suggestions = ['確認頁面已完全載入', '檢查是否在正確的頁面', '嘗試手動點擊一次'];
+  }
+  else if (messageLower.includes('tschoolkit') || messageLower.includes('新分頁') || messageLower.includes('tab')) {
+    category = 'tab_navigation';
+    userMessage = 'tschoolkit 頁面開啟失敗';
+    suggestions = ['檢查網路連線', '確認 tschoolkit 網站可正常訪問', '關閉其他不必要的分頁'];
+  }
+  else if (messageLower.includes('modal') || messageLower.includes('form') || messageLower.includes('表單')) {
+    category = 'form_access';
+    userMessage = '無法開啟週曆填報表單';
+    suggestions = ['手動點擊「週曆填報」按鈕', '確認頁面沒有彈出視窗阻擋', '重新載入 tschoolkit 頁面'];
+  }
+  else if (messageLower.includes('fill') || messageLower.includes('填寫') || messageLower.includes('custom') || messageLower.includes('自訂')) {
+    category = 'form_filling';
+    userMessage = '表單填寫失敗';
+    suggestions = ['檢查週曆資料格式', '確認所有必填欄位都有資料', '手動檢查並完成填寫'];
+  }
+  else if (messageLower.includes('submit') || messageLower.includes('提交') || messageLower.includes('送出')) {
+    category = 'submission';
+    userMessage = '提交失敗';
+    suggestions = ['檢查網路連線', '確認表單資料完整', '嘗試手動提交'];
+  }
+  else if (messageLower.includes('timeout') || messageLower.includes('超時')) {
+    category = 'timeout';
+    userMessage = '操作超時';
+    suggestions = ['檢查網路連線速度', '關閉其他耗費資源的程式', '稍後重試'];
+  }
+
+  return {
+    category,
+    userMessage,
+    suggestions,
+    originalError: message,
+    timestamp: new Date().toISOString()
+  };
+}
+
+// ========= 6) 會被注入頁面的函式（序列化） =========
 
 // 檢查 1Campus 頁面狀態
 function check1CampusPageStatus() {
@@ -717,7 +945,261 @@ function clickWeeklyReportButton() {
   return false;
 }
 
-// tschoolkit（彈窗）：依 payload 填值（支援自定義地點與完整診斷）
+// ========= 三輪式填寫架構 =========
+
+// 第一輪：分析所有下拉選單的可用選項
+async function analyzeModalOptions(modal, payload) {
+  console.log("[ClassSync Phase1] 開始分析下拉選單選項");
+
+  const result = {
+    blockByDate: new Map(),
+    optionsBySlot: new Map(), // key: "dateISO:slotIndex", value: { select, options, needsCustom }
+    errors: []
+  };
+
+  // 建立日期對應表
+  const blocks = Array.from(modal.querySelectorAll(".p-4.space-y-4"));
+  console.log(`[ClassSync Phase1] 找到 ${blocks.length} 個日期區塊`);
+
+  blocks.forEach((block, index) => {
+    const title = block.querySelector("p.text-xl.text-primary");
+    const txt = (title?.textContent || "").trim();
+    const dateStr = txt.slice(0, 10);
+    result.blockByDate.set(dateStr, block);
+    console.log(`[ClassSync Phase1] 區塊 ${index + 1}: ${txt} -> ${dateStr}`);
+  });
+
+  // 分析每日的選項
+  for (const day of payload.days) {
+    const block = result.blockByDate.get(day.dateISO);
+    if (!block) {
+      result.errors.push({ date: day.dateISO, phase: "analyze", err: "block-not-found" });
+      continue;
+    }
+
+    const selects = Array.from(block.querySelectorAll("select"));
+    console.log(`[ClassSync Phase1] 日期 ${day.dateISO} 找到 ${selects.length} 個下拉選單`);
+
+    selects.forEach((select, slotIndex) => {
+      const slotKey = `${day.dateISO}:${slotIndex}`;
+      const options = Array.from(select.options || []);
+      const normalizedSlot = normalizeSlot(day.slots[slotIndex]);
+
+      // 判斷是否需要自定義地點
+      const needsCustom = normalizedSlot && normalizedSlot.isCustom;
+
+      result.optionsBySlot.set(slotKey, {
+        select,
+        options,
+        normalizedSlot,
+        needsCustom,
+        targetLocation: normalizedSlot?.location || day.slots[slotIndex]
+      });
+
+      console.log(`[ClassSync Phase1] ${slotKey}: 目標="${normalizedSlot?.location || day.slots[slotIndex]}", 需要自定義=${needsCustom}`);
+    });
+  }
+
+  console.log(`[ClassSync Phase1] 完成分析，共 ${result.optionsBySlot.size} 個時段`);
+  return result;
+}
+
+// 第二輪：收集需要的輸入框
+async function collectCustomInputs(analysisResult) {
+  console.log("[ClassSync Phase2] 開始收集自定義地點輸入框");
+
+  const inputsBySlot = new Map(); // key: "dateISO:slotIndex", value: input element
+  const errors = [];
+
+  // 先設定所有需要「其他地點」的下拉選單
+  for (const [slotKey, slotInfo] of analysisResult.optionsBySlot) {
+    if (!slotInfo.needsCustom) continue;
+
+    const { select } = slotInfo;
+    console.log(`[ClassSync Phase2] 設定 ${slotKey} 為「其他地點」`);
+
+    // 設定為「其他地點」
+    if (select.value !== '其他地點') {
+      select.value = '其他地點';
+      select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    }
+  }
+
+  // 等待一下讓 DOM 更新
+  await new Promise(r => setTimeout(r, 200));
+
+  // 收集所有輸入框
+  for (const [slotKey, slotInfo] of analysisResult.optionsBySlot) {
+    if (!slotInfo.needsCustom) continue;
+
+    const container = slotInfo.select.closest('.w-full');
+    try {
+      const input = await getOrWaitCustomInput(container, slotInfo.select, 3000);
+      if (input) {
+        inputsBySlot.set(slotKey, input);
+        console.log(`[ClassSync Phase2] ✅ ${slotKey} 找到輸入框`);
+      } else {
+        errors.push({ slotKey, phase: "collect", err: "input-not-found" });
+        console.log(`[ClassSync Phase2] ❌ ${slotKey} 找不到輸入框`);
+      }
+    } catch (err) {
+      errors.push({ slotKey, phase: "collect", err: "input-error", details: err.message });
+      console.log(`[ClassSync Phase2] ❌ ${slotKey} 輸入框收集錯誤:`, err);
+    }
+  }
+
+  console.log(`[ClassSync Phase2] 完成收集，共 ${inputsBySlot.size} 個輸入框`);
+  return { inputsBySlot, errors };
+}
+
+// 第三輪：批次填寫所有資料
+async function fillAllData(analysisResult, inputsResult) {
+  console.log("[ClassSync Phase3] 開始批次填寫資料");
+
+  const result = {
+    filledSlots: 0,
+    totalSlots: analysisResult.optionsBySlot.size,
+    errors: [...analysisResult.errors, ...inputsResult.errors],
+    details: []
+  };
+
+  for (const [slotKey, slotInfo] of analysisResult.optionsBySlot) {
+    const [dateISO, slotIndex] = slotKey.split(':');
+    const slotIndexNum = parseInt(slotIndex);
+
+    try {
+      if (slotInfo.needsCustom) {
+        // 處理自定義地點
+        const input = inputsResult.inputsBySlot.get(slotKey);
+        if (!input) {
+          result.errors.push({ slotKey, phase: "fill", err: "no-input-available" });
+          continue;
+        }
+
+        const customResult = await fillCustomLocationDirect(input, slotInfo.normalizedSlot.customName, slotIndexNum);
+
+        result.details.push({
+          slotKey,
+          type: "custom",
+          wanted: slotInfo.normalizedSlot.customName,
+          success: customResult.success,
+          value: customResult.customLocationValue
+        });
+
+        if (customResult.success) {
+          result.filledSlots++;
+        } else {
+          result.errors.push({ slotKey, phase: "fill", err: "custom-fill-failed", details: customResult });
+        }
+
+      } else {
+        // 處理一般地點
+        const { select, options, targetLocation } = slotInfo;
+
+        // 尋找匹配的選項
+        let target = options.find(o =>
+          ((o.value || "").trim() === targetLocation) ||
+          ((o.textContent || "").trim() === targetLocation)
+        );
+
+        if (!target) {
+          // 嘗試模糊匹配
+          target = options.find(o => {
+            const optText = (o.textContent || "").trim();
+            return optText.includes(targetLocation) || targetLocation.includes(optText);
+          });
+        }
+
+        if (!target) {
+          // 使用第一個有效選項
+          target = options.find(o =>
+            !o.disabled &&
+            o.value &&
+            o.value !== "none" &&
+            o.value !== "" &&
+            (o.textContent || "").trim() !== ""
+          );
+        }
+
+        if (target) {
+          select.value = target.value;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+
+          const success = select.value === target.value;
+
+          result.details.push({
+            slotKey,
+            type: "standard",
+            wanted: targetLocation,
+            selected: target.textContent?.trim(),
+            value: target.value,
+            success
+          });
+
+          if (success) {
+            result.filledSlots++;
+          } else {
+            result.errors.push({ slotKey, phase: "fill", err: "select-failed" });
+          }
+
+          console.log(`[ClassSync Phase3] ${slotKey}: ${success ? '✅' : '❌'} ${targetLocation} -> ${target.textContent?.trim()}`);
+        } else {
+          result.errors.push({
+            slotKey,
+            phase: "fill",
+            err: "no-suitable-option",
+            availableOptions: options.map(o => o.textContent?.trim()).filter(Boolean)
+          });
+
+          result.details.push({
+            slotKey,
+            type: "standard",
+            wanted: targetLocation,
+            selected: null,
+            success: false
+          });
+        }
+      }
+    } catch (err) {
+      result.errors.push({ slotKey, phase: "fill", err: "unexpected-error", details: err.message });
+    }
+  }
+
+  console.log(`[ClassSync Phase3] 完成填寫，成功 ${result.filledSlots}/${result.totalSlots} 個時段`);
+  return result;
+}
+
+// 直接填寫自定義地點輸入框（不再查找輸入框）
+async function fillCustomLocationDirect(input, customName, slotIndex) {
+  console.log(`[ClassSync Fill] 直接填寫自定義地點: 時段 ${slotIndex + 1}, 地點: "${customName}"`);
+
+  try {
+    if (!input || !isInputReady(input)) {
+      return { success: false, reason: 'input-not-ready', customLocationValue: null };
+    }
+
+    // 強制解除禁用狀態
+    input.disabled = false;
+    input.readOnly = false;
+
+    // 使用修復後的填寫方法
+    input.focus();
+    setNativeInputValue(input, customName);
+    input.blur();
+
+    // 驗證結果
+    const ok = input.value === customName;
+    console.log(`[ClassSync Fill] 自定義地點填寫 ${ok ? '成功' : '失敗'}: "${input.value}" (期望: "${customName}")`);
+
+    return { success: ok, reason: ok ? 'filled' : 'value-mismatch', customLocationValue: input.value };
+  } catch (err) {
+    console.error(`[ClassSync Fill] 自定義地點填寫錯誤:`, err);
+    return { success: false, reason: 'fill-error', customLocationValue: null, error: err?.message };
+  }
+}
+
+// tschoolkit（彈窗）：依 payload 填值 - 重構為三輪式架構
 async function fillModalByPayload(payload) {
   const PREFIX = "[ClassSync Fill]";
   const log = (...args) => console.log(PREFIX, ...args);
@@ -782,419 +1264,67 @@ async function fillModalByPayload(payload) {
       const suffix = rawText.slice(delimiterIndex + 1).trim();
       const isCustom = prefix === "其他地點" || Boolean(suffix);
       return {
-        location: prefix || "其他地點",
-        customName: suffix || null,
-        isCustom,
-        raw: slot,
+        ok: false,
+        reason: "modal-not-visible",
+        details: "Modal is not visible",
+        filledDays: 0,
+        totalDays: payload.days.length,
+        errors: [{ err: "modal-not-visible", details: "Modal is not visible" }],
+        successRate: 0
       };
     }
 
-    return {
-      location: rawText,
-      customName: null,
-      isCustom: rawText === "其他地點",
-      raw: slot,
-    };
-  };
+    // === 三輪式填寫流程 ===
 
-  const isElementVisible = (el) => {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    const style = window.getComputedStyle(el);
-    return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
-  };
+    // 第一輪：分析所有下拉選單的可用選項
+    console.log("[ClassSync Fill] 🔄 第一輪：分析選項");
+    const analysisResult = await analyzeModalOptions(modal, payload);
 
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // 第二輪：收集需要的輸入框
+    console.log("[ClassSync Fill] 🔄 第二輪：收集輸入框");
+    const inputsResult = await collectCustomInputs(analysisResult);
 
-  const findModal = () => {
-    const selectors = [
-      "#next-week-event-modal .modal-box",
-      ".modal.modal-open .modal-box",
-      ".modal-box",
-      "[role=\"dialog\"] .modal-box",
-      "[role=\"dialog\"]",
-    ];
+    // 第三輪：批次填寫所有資料
+    console.log("[ClassSync Fill] 🔄 第三輪：批次填寫");
+    const fillResult = await fillAllData(analysisResult, inputsResult);
 
-    for (const selector of selectors) {
-      const candidate = document.querySelector(selector);
-      if (candidate) {
-        if (candidate.classList?.contains("modal-box")) {
-          return candidate;
-        }
-        const nested = candidate.querySelector?.(".modal-box");
-        if (nested) return nested;
-        return candidate;
+    // 組裝最終結果
+    const totalSlots = analysisResult.optionsBySlot.size;
+    const filledSlots = fillResult.filledSlots;
+    const slotsByDay = new Map();
+
+    // 按日期組織結果
+    for (const day of payload.days) {
+      slotsByDay.set(day.dateISO, { slotsCount: day.slots.length, filledCount: 0 });
+    }
+
+    // 計算每日成功率
+    for (const detail of fillResult.details) {
+      const [dateISO] = detail.slotKey.split(':');
+      const dayInfo = slotsByDay.get(dateISO);
+      if (dayInfo && detail.success) {
+        dayInfo.filledCount++;
       }
     }
-    return null;
-  };
 
-  const gatherCustomInputsNearSelect = (selectEl) => {
-    const candidates = [];
-    const seen = new Set();
-    const pushCandidate = (node) => {
-      if (!node) return;
-      if (!(node instanceof HTMLElement)) return;
-      if (seen.has(node)) return;
-      if (node.matches("input,textarea")) {
-        const input = node;
-        if (
-          input.tagName === "INPUT" &&
-          (input.type === "" || input.type === "text") &&
-          !input.disabled &&
-          !input.readOnly &&
-          isElementVisible(input)
-        ) {
-          seen.add(input);
-          candidates.push(input);
-        }
+    // 計算成功的天數
+    let filledDays = 0;
+    for (const [, dayInfo] of slotsByDay) {
+      if (dayInfo.filledCount === dayInfo.slotsCount) {
+        filledDays++;
       }
-      if (node !== selectEl && node.querySelector) {
-        node.querySelectorAll("input[type=\"text\"],input:not([type])").forEach((child) => {
-          if (
-            child.tagName === "INPUT" &&
-            (child.type === "" || child.type === "text") &&
-            !child.disabled &&
-            !child.readOnly &&
-            isElementVisible(child)
-          ) {
-            if (!seen.has(child)) {
-              seen.add(child);
-              candidates.push(child);
-            }
-          }
-        });
-      }
-    };
-
-    pushCandidate(selectEl.nextElementSibling);
-    const container = selectEl.closest(".w-full, .slot-container");
-    if (container) pushCandidate(container);
-    const block = selectEl.closest(".p-4.space-y-4, [data-day-block]");
-    if (block) pushCandidate(block);
-    const modal = selectEl.closest(".modal-box") || findModal();
-    if (modal) pushCandidate(modal);
-
-    const filtered = candidates.filter((input) => {
-      const position = selectEl.compareDocumentPosition(input);
-      const isFollowing =
-        position & Node.DOCUMENT_POSITION_FOLLOWING ||
-        position == Node.DOCUMENT_POSITION_EQUAL;
-      return isFollowing;
-    });
-
-    const selectRect = selectEl.getBoundingClientRect();
-    filtered.sort((a, b) => {
-      const rectA = a.getBoundingClientRect();
-      const rectB = b.getBoundingClientRect();
-      const distanceA = Math.hypot(
-        rectA.left + rectA.width / 2 - (selectRect.left + selectRect.width / 2),
-        rectA.top + rectA.height / 2 - (selectRect.top + selectRect.height / 2)
-      );
-      const distanceB = Math.hypot(
-        rectB.left + rectB.width / 2 - (selectRect.left + selectRect.width / 2),
-        rectB.top + rectB.height / 2 - (selectRect.top + selectRect.height / 2)
-      );
-      return distanceA - distanceB;
-    });
-
-    return filtered;
-  };
-
-  const waitForCustomInput = async (selectEl, slotMeta, { maxWait = 2000, interval = 120 } = {}) => {
-    const start = performance.now();
-    let attempts = 0;
-    while (performance.now() - start <= maxWait) {
-      const candidates = gatherCustomInputsNearSelect(selectEl);
-      if (candidates.length > 0) {
-        return { input: candidates[0], attempts };
-      }
-      await wait(interval);
-      attempts += 1;
     }
-    warn(
-      `時段 ${slotMeta.slotIndex + 1}: 已等待 ${maxWait}ms 仍找不到自定義輸入框`,
-      slotMeta
-    );
-    return { input: null, attempts };
-  };
-
-  try {
-    log("開始填寫 Modal，payload:", payload);
-
-    if (typeof document === "undefined") {
-      error("Document 物件不存在，執行環境異常");
-      return buildFailure("no-document", "Document object not available");
-    }
-
-    if (!payload || !Array.isArray(payload.days)) {
-      error("無效的 payload 格式");
-      return buildFailure("invalid-payload", "Invalid payload format", { payload });
-    }
-
-    const modal = findModal();
-    if (!modal) {
-      error("找不到 modal 容器");
-      return buildFailure("no-modal", "Modal element not found");
-    }
-
-    if (!isElementVisible(modal)) {
-      error("Modal 不可見");
-      return buildFailure("modal-not-visible", "Modal is not visible");
-    }
-
-    log("✅ 找到 modal 容器:", modal);
-
-    const blocks = Array.from(modal.querySelectorAll(".p-4.space-y-4"));
-    if (!blocks.length) {
-      error("找不到日期區塊");
-      return buildFailure("no-day-blocks", "No day blocks found in modal");
-    }
-
-    log(`找到 ${blocks.length} 個日期區塊`);
-
-    const blockByDate = new Map();
-    blocks.forEach((block, index) => {
-      const title = block.querySelector("p.text-xl.text-primary, h3, header");
-      const text = (title?.textContent || "").trim();
-      const dateText = text.slice(0, 10);
-      blockByDate.set(dateText, block);
-      log(`區塊 ${index + 1}: ${text} -> ${dateText}`);
-    });
-
-    const placeWhitelist = Array.isArray(payload.placeWhitelist) ? payload.placeWhitelist : null;
-    const normalizedDays = payload.days.map((day, dayIndex) => ({
-      dateISO: day.dateISO,
-      dayIndex,
-      slots: Array.isArray(day.slots)
-        ? day.slots.map((slot, slotIndex) => {
-            const normalized = normalizeSlot(slot);
-            normalized.dayIndex = dayIndex;
-            normalized.slotIndex = slotIndex;
-            return normalized;
-          })
-        : [],
-    }));
 
     const result = {
-      ok: true,
-      filledDays: 0,
-      totalDays: normalizedDays.length,
-      errors: [],
-      details: [],
-      successRate: 0,
+      ok: fillResult.errors.length === 0,
+      filledDays,
+      totalDays: payload.days.length,
+      errors: fillResult.errors,
+      details: fillResult.details,
+      successRate: filledDays / payload.days.length
     };
 
-    for (const day of normalizedDays) {
-      log(`處理日期: ${day.dateISO}, 地點: [${day.slots.map((s) => s.customName ? `${s.location}:${s.customName}` : s.location).join(", ")}]`);
-
-      const block = blockByDate.get(day.dateISO);
-      if (!block) {
-        const errorEntry = { date: day.dateISO, err: "block-not-found" };
-        result.errors.push(errorEntry);
-        error(`❌ 找不到日期區塊: ${day.dateISO}`);
-        continue;
-      }
-
-      const selects = Array.from(block.querySelectorAll("select"));
-      log(`日期 ${day.dateISO} 找到 ${selects.length} 個下拉選單`);
-
-      if (!selects.length) {
-        const errorEntry = { date: day.dateISO, err: "no-selects" };
-        result.errors.push(errorEntry);
-        error(`❌ 日期 ${day.dateISO} 找不到下拉選單`);
-        continue;
-      }
-
-      let dayFilled = true;
-      const dayDetails = { date: day.dateISO, slots: [] };
-
-      for (let i = 0; i < Math.min(selects.length, day.slots.length); i++) {
-        const selectEl = selects[i];
-        const slotInfo = day.slots[i];
-        const options = Array.from(selectEl.options || []);
-        const slotLabel = slotInfo.customName
-          ? `${slotInfo.location}:${slotInfo.customName}`
-          : slotInfo.location;
-
-        log(`時段 ${i + 1}: 原始 slot 資料:`, slotInfo.raw);
-        log(`時段 ${i + 1}: 標準化後的 slot:`, slotInfo);
-        log(
-          `時段 ${i + 1}: 可用選項: [${options
-            .map((opt) => `"${(opt.value || "").trim()}": "${(opt.textContent || "").trim()}"`)
-            .join(", ""))}]`
-        );
-
-        if (
-          placeWhitelist &&
-          slotInfo.location &&
-          !slotInfo.isCustom &&
-          !placeWhitelist.includes(slotInfo.location)
-        ) {
-          warn(
-            `時段 ${i + 1}: "${slotInfo.location}" 不在允許清單中，仍嘗試匹配`,
-            placeWhitelist
-          );
-        }
-
-        const findMatchingOption = () => {
-          const trimmed = (value) => (value == null ? "" : String(value).trim());
-          const targetText = trimmed(slotInfo.location);
-          let targetOption =
-            options.find(
-              (opt) =>
-                trimmed(opt.value) === targetText || trimmed(opt.textContent) === targetText
-            ) || null;
-
-          if (!targetOption && targetText) {
-            const lowerTarget = targetText.toLowerCase();
-            targetOption =
-              options.find((opt) => {
-                const text = trimmed(opt.textContent).toLowerCase();
-                const value = trimmed(opt.value).toLowerCase();
-                return text.includes(lowerTarget) || value.includes(lowerTarget);
-              }) || null;
-          }
-
-          if (!targetOption && !slotInfo.isCustom) {
-            targetOption =
-              options.find(
-                (opt) =>
-                  !opt.disabled &&
-                  opt.value &&
-                  opt.value !== "none" &&
-                  trimmed(opt.textContent) !== ""
-              ) || null;
-          }
-
-          return targetOption;
-        };
-
-        const targetOption = findMatchingOption();
-        if (!targetOption) {
-          const errorEntry = {
-            date: day.dateISO,
-            idx: i,
-            err: "option-not-found",
-            wanted: slotLabel,
-            availableOptions: options.map((opt) => opt.textContent?.trim()).filter(Boolean),
-          };
-          result.errors.push(errorEntry);
-          dayDetails.slots.push({
-            index: i,
-            wanted: slotLabel,
-            selected: null,
-            value: null,
-            success: false,
-          });
-          error(`❌ 時段 ${i + 1}: 找不到適合的選項給 "${slotLabel}"`);
-          dayFilled = false;
-          continue;
-        }
-
-        const previousValue = selectEl.value;
-        targetOption.selected = true;
-        selectEl.value = targetOption.value;
-        selectEl.dispatchEvent(new Event("change", { bubbles: true }));
-        selectEl.dispatchEvent(new Event("input", { bubbles: true }));
-        await wait(60);
-
-        let customInputResult = { success: true, value: null };
-        if (slotInfo.isCustom) {
-          const desiredName = slotInfo.customName || "";
-          const { input: customInput, attempts } = await waitForCustomInput(selectEl, slotInfo);
-          if (customInput) {
-            log(
-              `時段 ${i + 1}: 找到自定義輸入框（重試 ${attempts} 次）`,
-              customInput
-            );
-            const nativeSetter =
-              Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-            if (nativeSetter) {
-              customInput.focus();
-              nativeSetter.call(customInput, desiredName);
-              customInput.dispatchEvent(new InputEvent("input", { bubbles: true }));
-              customInput.dispatchEvent(new Event("change", { bubbles: true }));
-              customInput.blur();
-              await wait(120);
-            } else {
-              customInput.value = desiredName;
-              customInput.dispatchEvent(new Event("input", { bubbles: true }));
-              customInput.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-            customInputResult.value = customInput.value;
-            customInputResult.success = customInput.value.trim() === desiredName.trim();
-            log(
-              `時段 ${i + 1}: 自定義地點輸入 ${customInputResult.success ? "✅" : "❌"} "${desiredName}" -> "${customInputResult.value}"`
-            );
-            if (!customInputResult.success) {
-              warn(`時段 ${i + 1}: 自定義輸入框未成功設定值`, {
-                desiredName,
-                actualValue: customInputResult.value,
-              });
-            }
-          } else {
-            customInputResult.success = false;
-            result.errors.push({
-              date: day.dateISO,
-              idx: i,
-              err: "custom-input-not-found",
-              wanted: slotLabel,
-            });
-          }
-        }
-
-        const newValue = selectEl.value;
-        const selectSuccess = newValue === targetOption.value;
-        const slotSuccess = selectSuccess && customInputResult.success;
-
-        log(
-          `時段 ${i + 1}: ${slotSuccess ? "✅" : "❌"} "${slotLabel}" -> "${
-            targetOption.textContent?.trim() || targetOption.value
-          }" (${previousValue} -> ${newValue})`
-        );
-
-        dayDetails.slots.push({
-          index: i,
-          wanted: slotLabel,
-          selected: targetOption.textContent?.trim() || targetOption.value,
-          value: targetOption.value,
-          oldValue: previousValue,
-          newValue,
-          customLocationValue: customInputResult.value,
-          success: slotSuccess,
-        });
-
-        if (!slotSuccess) {
-          dayFilled = false;
-          result.errors.push({
-            date: day.dateISO,
-            idx: i,
-            err: !selectSuccess ? "set-value-failed" : "custom-location-failed",
-            wanted: slotLabel,
-            attempted: targetOption.value,
-            oldValue: previousValue,
-            newValue,
-            customValue: customInputResult.value,
-          });
-        }
-      }
-
-      result.details.push(dayDetails);
-      if (dayFilled) {
-        result.filledDays += 1;
-      }
-    }
-
-    result.successRate =
-      result.totalDays > 0 ? result.filledDays / result.totalDays : 0;
-    result.ok = result.errors.length === 0;
-
-    log(
-      `填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`
-    );
-    log("詳細結果:", result);
+    console.log(`[ClassSync Fill] ✅ 三輪式填寫完成: ${filledDays}/${payload.days.length} 天成功，${filledSlots}/${totalSlots} 個時段成功，錯誤數 ${fillResult.errors.length}`);
 
     return result;
   } catch (err) {
@@ -1343,15 +1473,10 @@ async function startFlow() {
     const payload = await resolvePayload();
     console.log("[ClassSync] 使用的 payload:", payload);
 
-    // 通知 UI 有新資料
-    notifyUI('DATA_RECEIVED', { data: payload });
-
     // 1) 打開/切到 1Campus
     console.log("[ClassSync] 步驟 1: 打開或切換到 1Campus");
-    updateUIStep(0, 'running');
     const tabId = await openOrFocus(ONECAMPUS);
     console.log("[ClassSync] 1Campus 分頁 ID:", tabId);
-    updateUIStep(0, 'completed');
 
   // 2) 智能等待 1Campus 頁面完全載入
   console.log("[ClassSync] 步驟 2a: 智能等待 1Campus 頁面完全載入");
@@ -1359,7 +1484,6 @@ async function startFlow() {
 
   if (!pageReady.ready) {
     console.error("[ClassSync] ❌ 1Campus 頁面載入超時:", pageReady.reason);
-    updateUIStep(1, 'error', '頁面載入超時');
     throw new Error(`1Campus 頁面載入失敗: ${pageReady.reason}`);
   }
 
@@ -1378,7 +1502,6 @@ async function startFlow() {
 
     if (pageStatus.isLoginPage) {
       console.error("[ClassSync] ❌ 檢測到登入頁面，請先手動登入");
-      updateUIStep(1, 'error', '需要登入');
       throw new Error("檢測到登入頁面，請先手動登入");
     }
 
@@ -1391,7 +1514,6 @@ async function startFlow() {
 
   // 2b) 智能搜尋並點擊「學習週曆」卡
   console.log("[ClassSync] 步驟 2b: 智能搜尋並點擊「學習週曆」卡");
-  updateUIStep(1, 'running');
   let clicked = false;
   let currentUrl = null;
 
@@ -1424,7 +1546,6 @@ async function startFlow() {
       if (result) {
         clicked = true;
         console.log("[ClassSync] ✅ 成功點擊「學習週曆」卡");
-        updateUIStep(1, 'completed');
 
         // 等待並檢查 URL 變化
         await sleep(1500);
@@ -1461,13 +1582,11 @@ async function startFlow() {
   if (!clicked) {
     console.error("[ClassSync] ❌ 無法找到或點擊「學習週曆」卡");
     console.log("[ClassSync] 💡 建議：請檢查頁面是否已載入完成，或嘗試手動點擊一次");
-    updateUIStep(1, 'error', '點擊學習週曆失敗');
     throw new Error("無法點擊學習週曆卡");
   }
 
   // 3) 監控新分頁的創建（tschoolkit 會在新分頁開啟）
   console.log("[ClassSync] 步驟 3: 監控新分頁創建，等待 tschoolkit...");
-  updateUIStep(2, 'running');
 
   const onTabCreated = async (tab) => {
     console.log(`[ClassSync Monitor] 新分頁被創建: ${tab.url || '(URL未知)'}`);
@@ -1475,7 +1594,6 @@ async function startFlow() {
     // 檢查是否是 tschoolkit 相關的分頁
     if (tab.url && tab.url.startsWith(TSKIT)) {
       console.log(`[ClassSync Monitor] ✅ 檢測到 tschoolkit 新分頁: ${tab.id}`);
-      updateUIStep(2, 'completed');
       chrome.tabs.onCreated.removeListener(onTabCreated);
 
       // 等待新分頁載入完成
@@ -1514,7 +1632,6 @@ async function startFlow() {
 
           if (changeInfo.url.startsWith(TSKIT)) {
             console.log(`[ClassSync Monitor] ✅ 檢測到 tschoolkit URL: ${tab.id}`);
-            updateUIStep(2, 'completed');
             chrome.tabs.onCreated.removeListener(onTabCreated);
             chrome.tabs.onUpdated.removeListener(onTabUpdated);
 
@@ -1584,13 +1701,20 @@ async function startFlow() {
     console.error("[ClassSync Monitor] ❌ 等待 tschoolkit 新分頁超時 (30秒)");
     chrome.tabs.onCreated.removeListener(onTabCreated);
     uiState.isRunning = false;
-    notifyUI('PROCESS_ERROR', { error: '等待 tschoolkit 新分頁超時', step: 2 });
+    notifyUI('PROCESS_ERROR', { error: '等待 tschoolkit 新分頁超時' });
   }, 30000);
 
   } catch (error) {
     console.error("[ClassSync] 主流程執行失敗:", error);
     uiState.isRunning = false;
-    notifyUI('PROCESS_ERROR', { error: error.message, step: uiState.currentStep });
+
+    // 提供更詳細的錯誤資訊
+    const errorInfo = categorizeError(error);
+    notifyUI('PROCESS_ERROR', { error: errorInfo.userMessage });
+
+    // 記錄詳細錯誤用於除錯
+    console.error("[ClassSync] 錯誤分類:", errorInfo);
+
     throw error;
   }
 }
@@ -1618,7 +1742,6 @@ async function executeTschoolkitFlow(tabId) {
 
   // 4) 等待頁面載入並點「待填下週」
   console.log("[ClassSync] 步驟 4: 等待頁面載入並點擊「待填下週」標籤");
-  updateUIStep(3, 'running');
 
   // 先等待標籤元素出現
   const tabElementReady = await waitForElement(tabId, 'a.tab, button.tab, [role="tab"]', 20, 400);
@@ -1639,7 +1762,6 @@ async function executeTschoolkitFlow(tabId) {
       if (result) {
         tabClicked = true;
         console.log("[ClassSync] ✅ 成功點擊「待填下週」標籤");
-        updateUIStep(3, 'completed');
 
         // 等待標籤切換完成
         await sleep(500);
@@ -1659,7 +1781,6 @@ async function executeTschoolkitFlow(tabId) {
 
   // 5) 等待並點「週曆填報」
   console.log("[ClassSync] 步驟 5: 等待並點擊「週曆填報」按鈕");
-  updateUIStep(4, 'running');
 
   // 等待按鈕元素出現
   const buttonElementReady = await waitForElement(tabId, 'button, a, [role="button"]', 15, 400);
@@ -1680,7 +1801,6 @@ async function executeTschoolkitFlow(tabId) {
       if (result) {
         reportClicked = true;
         console.log("[ClassSync] ✅ 成功點擊「週曆填報」按鈕");
-        updateUIStep(4, 'completed');
         break;
       }
     }
@@ -1697,7 +1817,6 @@ async function executeTschoolkitFlow(tabId) {
 
   // 6) 等待 Modal 完全載入並填寫表單
   console.log("[ClassSync] 步驟 6: 等待 Modal 完全載入並填寫表單...");
-  updateUIStep(5, 'running');
 
   // 使用智能等待確保 Modal 完全準備就緒
   const modalReady = await waitForModalReady(tabId, 15, 500);
@@ -1791,7 +1910,460 @@ async function executeTschoolkitFlow(tabId) {
       console.log(`[ClassSync] 步驟 ${fillAttempts}.2: 開始執行腳本注入`);
       const scriptResult = await chrome.scripting.executeScript({
         target: { tabId: tabId },
-        func: fillModalByPayload,
+        func: async (payload) => {
+          // 使用重構後的三輪式填寫邏輯
+          try {
+            console.log("[ClassSync Fill] 開始填寫 Modal，payload:", payload);
+            console.log("[ClassSync Fill Debug] 執行環境檢查 - window 存在:", typeof window !== 'undefined');
+            console.log("[ClassSync Fill Debug] 執行環境檢查 - document 存在:", typeof document !== 'undefined');
+
+            // 內聯必要的輔助函數
+            function normalizeSlot(slot) {
+              if (typeof slot === 'string') {
+                // 處理舊格式的自訂地點："其他地點:地點名稱"
+                if (slot.includes(':') && slot.startsWith('其他地點:')) {
+                  const customName = slot.substring(5); // 移除 "其他地點:" 前綴（5個字符）
+                  return {
+                    location: "其他地點",
+                    customName: customName.trim(),
+                    isCustom: true
+                  };
+                }
+                // 標準地點
+                return {
+                  location: slot,
+                  customName: null,
+                  isCustom: false
+                };
+              } else if (typeof slot === 'object' && slot !== null && slot.location && slot.customName) {
+                // 新格式的自訂地點物件
+                return {
+                  location: slot.location,
+                  customName: slot.customName,
+                  isCustom: true
+                };
+              }
+
+              // 無效格式，返回預設值
+              return {
+                location: "在家中",
+                customName: null,
+                isCustom: false
+              };
+            }
+
+            console.log("[ClassSync Fill Debug] normalizeSlot 函數已定義:", typeof normalizeSlot === 'function');
+
+
+            // 內聯新版本的輔助函數
+            // 更穩健的可編輯判斷
+            function isEditable(el) {
+              if (!el) return false;
+              const cs = window.getComputedStyle(el);
+              const visible = cs.display !== 'none' && cs.visibility !== 'hidden' && el.getClientRects().length > 0;
+              const enabled = !el.disabled && !el.readOnly && !el.hasAttribute('aria-disabled');
+              return visible && enabled;
+            }
+
+            // 以 MutationObserver + 兩次 rAF 等待「真的可編輯」
+            function waitUntilEditable(targetEl, { timeout = 3000 } = {}) {
+              return new Promise((resolve) => {
+                if (isEditable(targetEl)) return resolve(true);
+
+                let done = false;
+                const stop = () => { if (!done) { done = true; obs.disconnect(); clearTimeout(tid); } };
+
+                const obs = new MutationObserver(async () => {
+                  // 多等兩個 animation frame，確保 layout 與樣式完成
+                  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                  if (isEditable(targetEl)) { stop(); resolve(true); }
+                });
+
+                obs.observe(document.documentElement, { attributes: true, childList: true, subtree: true });
+
+                const tid = setTimeout(() => { stop(); resolve(false); }, timeout);
+              });
+            }
+
+            // 修復後的自定義地點填寫相關函數
+
+            // 比原本「寬高>0」更穩定：看 computedStyle 與禁用態
+            function isInputReady(input) {
+              if (!input) return false;
+              const cs = getComputedStyle(input);
+              const visible = cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+              return visible && !input.disabled && !input.readOnly;
+            }
+
+            // 用原生 setter 寫值，解決 React/受控輸入不同步
+            function setNativeInputValue(input, value) {
+              // 使用 HTMLInputElement.prototype.value setter 確保跳過任何框架攔截
+              const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+
+              if (nativeSetter) {
+                nativeSetter.call(input, value);
+              } else {
+                // 理論上不會走到這，但保底
+                input.value = value;
+              }
+
+              // 對受控元件，input 事件是關鍵
+              input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+            }
+
+            // 等待/取得該 slot 的自訂輸入框：優先用 MutationObserver，退而求其次輪詢
+            function getOrWaitCustomInput(container, select, maxWaitMs = 3000) {
+              return new Promise((resolve) => {
+                // 先查一次
+                const q = () => container?.querySelector('input[type="text"], input[placeholder*="地點"], input[placeholder*="名稱"], input.input');
+                let found = q();
+                if (found) return resolve(found);
+
+                // 確保 select 已是「其他地點」
+                if (select && select.value !== '其他地點') {
+                  select.value = '其他地點';
+                  select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                  select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                }
+
+                // 用 MutationObserver 等待輸入框出現
+                const obs = new MutationObserver(() => {
+                  const el = q();
+                  if (el) {
+                    obs.disconnect();
+                    resolve(el);
+                  }
+                });
+                if (container) {
+                  obs.observe(container, { childList: true, subtree: true });
+                }
+
+                // 兜底 timeout
+                setTimeout(() => {
+                  obs.disconnect();
+                  resolve(q() || null);
+                }, maxWaitMs);
+              });
+            }
+
+            async function fillCustomLocation(container, customName, slotIndex) {
+              console.log(`測試填寫自訂地點: 時段 ${slotIndex + 1}, 地點: "${customName}"`);
+              try {
+                const select = container?.querySelector('select');
+
+                // 確保「其他地點」已選
+                if (select && select.value !== '其他地點') {
+                  select.value = '其他地點';
+                  select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                  select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                }
+
+                // 取得或等待 input
+                const input = await getOrWaitCustomInput(container, select, 3000);
+
+                if (!input) {
+                  console.error(`時段 ${slotIndex + 1}: 找不到輸入框`);
+                  return { success: false, reason: 'no-input', customLocationValue: null };
+                }
+
+                // 有些站點會短暫設為 readonly/disabled，這裡強制解除一次
+                input.disabled = false;
+                input.readOnly = false;
+
+                // 滾到可見（避免某些框架對不可見元素忽略事件）
+                input.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+
+                // 就算 isInputReady 回 false，也先試著填 — 很多時候其實能寫
+                input.focus();
+                setNativeInputValue(input, customName);
+                input.blur();
+
+                // 驗證
+                const ok = input.value === customName;
+                console.log(`時段 ${slotIndex + 1}: 自訂地點填寫 ${ok ? '✅' : '❌'} "${customName}" -> "${input.value}"`);
+                return { success: ok, reason: ok ? 'filled' : 'value-mismatch', customLocationValue: input.value };
+              } catch (err) {
+                console.error(`時段 ${slotIndex + 1}: 填寫時發生錯誤:`, err);
+                return { success: false, reason: 'fill-error', customLocationValue: null, error: err?.message };
+              }
+            }
+
+            console.log("[ClassSync Fill Debug] fillCustomLocation 函數已定義:", typeof fillCustomLocation === 'function');
+
+            // 檢查執行環境
+            if (typeof document === 'undefined') {
+              console.error("[ClassSync Fill] ❌ Document 物件不存在，執行環境異常");
+              return {
+                ok: false,
+                reason: "no-document",
+                details: "Document object not available",
+                filledDays: 0,
+                totalDays: payload?.days?.length || 0,
+                errors: [{ err: "no-document", details: "Document object not available" }],
+                successRate: 0
+              };
+            }
+
+            // 檢查 payload 有效性
+            if (!payload || !payload.days || !Array.isArray(payload.days)) {
+              console.error("[ClassSync Fill] ❌ 無效的 payload 格式");
+              return {
+                ok: false,
+                reason: "invalid-payload",
+                details: "Invalid payload format",
+                filledDays: 0,
+                totalDays: 0,
+                errors: [{ err: "invalid-payload", details: "Payload is null or missing days array" }],
+                successRate: 0
+              };
+            }
+
+            // 檢查 modal 容器 - 更新選擇器以匹配實際 HTML 結構
+            const modal = document.querySelector(".modal-box") ||
+                         document.querySelector('[role="dialog"]') ||
+                         document.querySelector('.modal') ||
+                         document.querySelector('#next-week-event-modal .modal-box');
+
+            if (!modal) {
+              console.error("[ClassSync Fill] ❌ 找不到 modal 容器");
+              return {
+                ok: false,
+                reason: "no-modal",
+                details: "Modal element not found",
+                filledDays: 0,
+                totalDays: payload.days.length,
+                errors: [{ err: "no-modal", details: "Modal element not found" }],
+                successRate: 0
+              };
+            }
+
+            console.log("[ClassSync Fill] ✅ 找到 modal 容器:", modal);
+
+            // 檢查 modal 是否可見
+            if (modal.offsetWidth === 0 || modal.offsetHeight === 0) {
+              console.error("[ClassSync Fill] ❌ Modal 不可見");
+              return {
+                ok: false,
+                reason: "modal-not-visible",
+                details: "Modal is not visible",
+                filledDays: 0,
+                totalDays: payload.days.length,
+                errors: [{ err: "modal-not-visible", details: "Modal is not visible" }],
+                successRate: 0
+              };
+            }
+
+            const result = {
+              ok: true,
+              filledDays: 0,
+              totalDays: payload.days.length,
+              errors: [],
+              details: []
+            };
+
+            // 找到日期區塊：<div class="p-4 space-y-4">
+            const blocks = Array.from(modal.querySelectorAll(".p-4.space-y-4"));
+            console.log(`[ClassSync Fill] 找到 ${blocks.length} 個日期區塊`);
+
+            if (!blocks.length) {
+              console.error("[ClassSync Fill] ❌ 找不到日期區塊");
+              return {
+                ok: false,
+                reason: "no-day-blocks",
+                details: "No day blocks found in modal",
+                filledDays: 0,
+                totalDays: payload.days.length,
+                errors: [{ err: "no-day-blocks", details: "No day blocks found in modal" }],
+                successRate: 0
+              };
+            }
+
+            // 建立日期對應表
+            const blockByDate = new Map();
+            blocks.forEach((block, index) => {
+              const title = block.querySelector("p.text-xl.text-primary");
+              const txt = (title?.textContent || "").trim();
+              const dateStr = txt.slice(0, 10); // 提取 YYYY-MM-DD 格式
+              blockByDate.set(dateStr, block);
+              console.log(`[ClassSync Fill] 區塊 ${index + 1}: ${txt} -> ${dateStr}`);
+            });
+
+            // 逐日填寫
+            for (const d of payload.days) {
+              console.log(`[ClassSync Fill] 處理日期: ${d.dateISO}, 地點: [${d.slots.join(', ')}]`);
+
+              const block = blockByDate.get(d.dateISO);
+              if (!block) {
+                const error = { date: d.dateISO, err: "block-not-found" };
+                result.errors.push(error);
+                console.error(`[ClassSync Fill] ❌ 找不到日期區塊: ${d.dateISO}`);
+                continue;
+              }
+
+              const selects = Array.from(block.querySelectorAll("select"));
+              console.log(`[ClassSync Fill] 日期 ${d.dateISO} 找到 ${selects.length} 個下拉選單`);
+
+              if (!selects.length) {
+                const error = { date: d.dateISO, err: "no-selects" };
+                result.errors.push(error);
+                console.error(`[ClassSync Fill] ❌ 日期 ${d.dateISO} 找不到下拉選單`);
+                continue;
+              }
+
+              let dayFilled = true;
+              const dayDetails = { date: d.dateISO, slots: [] };
+
+              // 填寫每個時段
+              for (let i = 0; i < Math.min(selects.length, d.slots.length); i++) {
+                const sel = selects[i];
+                const rawSlot = d.slots[i];
+
+                console.log(`[ClassSync Fill Debug] 時段 ${i + 1}: 原始 slot 資料:`, rawSlot);
+                console.log(`[ClassSync Fill Debug] 時段 ${i + 1}: normalizeSlot 函數存在:`, typeof normalizeSlot === 'function');
+
+                const normalizedSlot = normalizeSlot(rawSlot);
+
+                console.log(`[ClassSync Fill Debug] 時段 ${i + 1}: 標準化後的 slot:`, normalizedSlot);
+                const opts = Array.from(sel.options || []);
+
+                console.log(`[ClassSync Fill] 時段 ${i + 1}: 處理 slot`, normalizedSlot);
+                console.log(`[ClassSync Fill] 可用選項: [${opts.map(o => `"${o.value}": "${o.textContent?.trim()}"`).join(', ')}]`);
+
+                // 尋找匹配的選項 - 使用標準化後的地點名稱
+                const wantedLocation = normalizedSlot.location;
+                let target = opts.find(o => {
+                  const optText = (o.textContent || "").trim();
+                  const optValue = (o.value || "").trim();
+                  return optText === wantedLocation || optValue === wantedLocation;
+                });
+
+                if (!target) {
+                  // 嘗試模糊匹配
+                  target = opts.find(o => {
+                    const optText = (o.textContent || "").trim();
+                    return optText.includes(wantedLocation) || wantedLocation.includes(optText);
+                  });
+                }
+
+                if (!target) {
+                  // 如果找不到匹配，使用第一個非 disabled 的有效選項
+                  target = opts.find(o =>
+                    !o.disabled &&
+                    o.value &&
+                    o.value !== "none" &&
+                    o.value !== "" &&
+                    (o.textContent || "").trim() !== ""
+                  );
+                }
+
+                if (target) {
+                  const oldValue = sel.value;
+
+                  // 同步選項狀態並觸發事件
+                  target.selected = true;
+                  sel.value = target.value;
+                  sel.dispatchEvent(new Event("change", { bubbles: true }));
+                  sel.dispatchEvent(new Event("input", { bubbles: true }));
+
+                  // 等待 DOM/框架更新
+                  await new Promise(r => setTimeout(r, 100));
+
+                  // 處理自訂地點填寫
+                  let customLocationResult = { success: true, customLocationValue: null };
+
+                  if (normalizedSlot.isCustom && target.value === "其他地點") {
+                    const container = sel.closest('.w-full');
+                    customLocationResult = await fillCustomLocation(container, normalizedSlot.customName, i);
+                  }
+
+                  // 驗證是否設定成功
+                  const newValue = sel.value;
+                  const selectSuccess = newValue === target.value;
+                  const overallSuccess = selectSuccess && customLocationResult.success;
+
+                  console.log(`[ClassSync Fill] 時段 ${i + 1}: ${overallSuccess ? '✅' : '❌'} ${JSON.stringify(normalizedSlot)} -> "${target.textContent?.trim()}" (${oldValue} -> ${newValue})${customLocationResult.customLocationValue ? ` + 自訂地點: "${customLocationResult.customLocationValue}"` : ''}`);
+
+                  dayDetails.slots.push({
+                    index: i,
+                    wanted: normalizedSlot,
+                    selected: target.textContent?.trim(),
+                    value: target.value,
+                    oldValue: oldValue,
+                    newValue: newValue,
+                    customLocationValue: customLocationResult.customLocationValue,
+                    success: overallSuccess
+                  });
+
+                  if (!overallSuccess) {
+                    dayFilled = false;
+                    result.errors.push({
+                      date: d.dateISO,
+                      idx: i,
+                      err: selectSuccess ? "custom-location-failed" : "set-value-failed",
+                      wanted: normalizedSlot,
+                      attempted: target.value,
+                      oldValue: oldValue,
+                      newValue: newValue,
+                      customLocationResult: customLocationResult,
+                      selectSuccess: selectSuccess
+                    });
+                  }
+                } else {
+                  console.error(`[ClassSync Fill] ❌ 時段 ${i + 1}: 找不到適合的選項給`, normalizedSlot);
+                  dayFilled = false;
+                  result.errors.push({
+                    date: d.dateISO,
+                    idx: i,
+                    err: "option-not-found",
+                    wanted: normalizedSlot,
+                    availableOptions: opts.map(o => `"${o.value}": "${o.textContent?.trim()}"`).filter(Boolean)
+                  });
+
+                  dayDetails.slots.push({
+                    index: i,
+                    wanted: normalizedSlot,
+                    selected: null,
+                    value: null,
+                    success: false
+                  });
+                }
+              }
+
+              result.details.push(dayDetails);
+              if (dayFilled) {
+                result.filledDays += 1;
+              }
+            }
+
+            // 計算成功率
+            result.successRate = result.totalDays > 0 ? result.filledDays / result.totalDays : 0;
+            result.ok = result.errors.length === 0;
+
+            console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`);
+            console.log(`[ClassSync Fill] 詳細結果:`, result);
+
+            return result;
+
+          } catch (error) {
+            console.error("[ClassSync Fill] ❌ 函數執行時發生未預期錯誤:", error);
+
+            // 確保總是返回一個有效的結果對象
+            return {
+              ok: false,
+              reason: "unexpected-error",
+              details: error.message || "Unknown error occurred",
+              filledDays: 0,
+              totalDays: payload?.days?.length || 0,
+              errors: [{
+                err: "unexpected-error",
+                details: error.message || "Unknown error occurred",
+                stack: error.stack
+              }],
+              successRate: 0
+            };
+          }
+        },
         args: [payload],
         world: "MAIN"
       });
@@ -1834,7 +2406,6 @@ async function executeTschoolkitFlow(tabId) {
       // 如果填寫成功或達到可接受的成功率，則跳出循環
       if (result.ok || result.successRate >= 0.8) {
         console.log(`[ClassSync] ✅ 表單填寫完成，成功率: ${(result.successRate * 100).toFixed(1)}%`);
-        updateUIStep(5, 'completed');
         break;
       }
 
@@ -1881,7 +2452,6 @@ async function executeTschoolkitFlow(tabId) {
 
   // 7) 提交表單並等待確認
   console.log("[ClassSync] 步驟 7: 提交表單並等待確認");
-  updateUIStep(6, 'running');
 
   let submitResult = null;
   let submitAttempts = 0;
@@ -1936,7 +2506,6 @@ async function executeTschoolkitFlow(tabId) {
 
   if (submissionResult.success) {
     console.log("[ClassSync] 🎉 表單提交成功！自動化流程完成！");
-    updateUIStep(6, 'completed');
     uiState.isRunning = false;
     notifyUI('PROCESS_COMPLETED', { success: true, data: payload });
     if (submissionResult.successMessage) {
@@ -1947,13 +2516,11 @@ async function executeTschoolkitFlow(tabId) {
     }
   } else if (submissionResult.errorMessage) {
     console.error(`[ClassSync] ❌ 提交失敗: ${submissionResult.errorMessage}`);
-    updateUIStep(6, 'error', '提交失敗');
     uiState.isRunning = false;
-    notifyUI('PROCESS_ERROR', { error: submissionResult.errorMessage, step: 6 });
+    notifyUI('PROCESS_ERROR', { error: submissionResult.errorMessage });
     throw new Error(`Submission failed: ${submissionResult.errorMessage}`);
   } else {
     console.warn("[ClassSync] ⚠️ 提交狀態不明確，但流程已完成");
-    updateUIStep(6, 'completed');
     uiState.isRunning = false;
     notifyUI('PROCESS_COMPLETED', { success: true, data: payload });
     console.log("[ClassSync] 📋 狀態資訊:", {
@@ -1967,16 +2534,9 @@ async function executeTschoolkitFlow(tabId) {
     console.error("[ClassSync tschoolkit] 執行流程時發生錯誤:", error.message);
     console.error("[ClassSync tschoolkit] 錯誤堆疊:", error.stack);
 
-    // 根據錯誤類型提供具體的建議
-    if (error.message.includes("Tab elements not found")) {
-      console.log("[ClassSync tschoolkit] 💡 建議：頁面可能未完全載入，請稍後再試或檢查網路連線");
-    } else if (error.message.includes("Modal not ready")) {
-      console.log("[ClassSync tschoolkit] 💡 建議：Modal 彈窗載入異常，請檢查頁面是否正常或手動重新操作");
-    } else if (error.message.includes("Form filling")) {
-      console.log("[ClassSync tschoolkit] 💡 建議：表單填寫問題，可能是選項不匹配或頁面結構變更");
-    } else if (error.message.includes("Submission")) {
-      console.log("[ClassSync tschoolkit] 💡 建議：提交過程出現問題，請檢查網路連線或手動確認提交狀態");
-    }
+    // 使用統一的錯誤分類系統
+    const errorInfo = categorizeError(error);
+    console.log("[ClassSync tschoolkit] 錯誤分析:", errorInfo);
 
     // 嘗試獲取當前頁面狀態以便診斷
     try {
@@ -1984,11 +2544,16 @@ async function executeTschoolkitFlow(tabId) {
       console.log("[ClassSync tschoolkit] 錯誤時的頁面狀態:", {
         url: tab.url,
         title: tab.title,
-        status: tab.status
+        status: tab.status,
+        errorCategory: errorInfo.category
       });
     } catch (tabError) {
       console.error("[ClassSync tschoolkit] 無法獲取錯誤時的頁面狀態:", tabError.message);
     }
+
+    // 通知 UI 更友善的錯誤訊息
+    uiState.isRunning = false;
+    notifyUI('PROCESS_ERROR', { error: errorInfo.userMessage });
 
     throw error; // 重新拋出錯誤，讓上層處理
   }

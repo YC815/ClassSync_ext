@@ -51,12 +51,14 @@
                 <option value="classroom1">教室1</option>
                 <option value="classroom2">教室2</option>
                 <option value="library">圖書館</option>
+                <option value="其他地點">其他地點</option>
             </select>
             <select name="slot2">
                 <option value="">請選擇</option>
                 <option value="classroom1">教室1</option>
                 <option value="classroom2">教室2</option>
                 <option value="library">圖書館</option>
+                <option value="其他地點">其他地點</option>
             </select>
         </div>
 
@@ -67,12 +69,14 @@
                 <option value="classroom1">教室1</option>
                 <option value="classroom2">教室2</option>
                 <option value="library">圖書館</option>
+                <option value="其他地點">其他地點</option>
             </select>
             <select name="slot2">
                 <option value="">請選擇</option>
                 <option value="classroom1">教室1</option>
                 <option value="classroom2">教室2</option>
                 <option value="library">圖書館</option>
+                <option value="其他地點">其他地點</option>
             </select>
         </div>
     </div>
@@ -80,6 +84,7 @@
     <div>
         <h3>測試按鈕</h3>
         <button class="btn-primary" onclick="testNormalPayload()">測試正常 Payload</button>
+        <button class="btn-primary" onclick="testCustomLocationPayload()">測試自定義地點 Payload</button>
         <button class="btn-primary" onclick="testInvalidPayload()">測試無效 Payload</button>
         <button class="btn-primary" onclick="testNullPayload()">測試 Null Payload</button>
         <button class="btn-secondary" onclick="hideModal()">隱藏 Modal</button>
@@ -90,7 +95,110 @@
     <div id="testResults"></div>
 
     <script>
-        // 從 background.js 複製的 fillModalByPayload 函數
+        // 修復後的自定義地點填寫相關函數
+
+        // 比原本「寬高>0」更穩定：看 computedStyle 與禁用態
+        function isInputReady(input) {
+          if (!input) return false;
+          const cs = getComputedStyle(input);
+          const visible = cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+          return visible && !input.disabled && !input.readOnly;
+        }
+
+        // 用原生 setter 寫值，解決 React/受控輸入不同步
+        function setNativeInputValue(input, value) {
+          const proto = Object.getPrototypeOf(input);
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          const setter = desc && desc.set;
+          if (setter) {
+            setter.call(input, value);
+          } else {
+            // 理論上不會走到這，但保底
+            input.value = value;
+          }
+          // 對受控元件，input 事件是關鍵
+          input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+        }
+
+        // 等待/取得該 slot 的自訂輸入框：優先用 MutationObserver，退而求其次輪詢
+        function getOrWaitCustomInput(container, select, maxWaitMs = 3000) {
+          return new Promise((resolve) => {
+            // 先查一次
+            const q = () => container?.querySelector('input[type="text"], input[placeholder*="地點"], input[placeholder*="名稱"], input.input');
+            let found = q();
+            if (found) return resolve(found);
+
+            // 確保 select 已是「其他地點」
+            if (select && select.value !== '其他地點') {
+              select.value = '其他地點';
+              select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+              select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+            }
+
+            // 用 MutationObserver 等待輸入框出現
+            const obs = new MutationObserver(() => {
+              const el = q();
+              if (el) {
+                obs.disconnect();
+                resolve(el);
+              }
+            });
+            if (container) {
+              obs.observe(container, { childList: true, subtree: true });
+            }
+
+            // 兜底 timeout
+            setTimeout(() => {
+              obs.disconnect();
+              resolve(q() || null);
+            }, maxWaitMs);
+          });
+        }
+
+        async function fillCustomLocation(container, customName, slotIndex) {
+          console.log(`測試填寫自訂地點: 時段 ${slotIndex + 1}, 地點: "${customName}"`);
+          try {
+            const select = container?.querySelector('select');
+
+            // 確保「其他地點」已選
+            if (select && select.value !== '其他地點') {
+              select.value = '其他地點';
+              select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+              select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+            }
+
+            // 取得或等待 input
+            const input = await getOrWaitCustomInput(container, select, 3000);
+
+            if (!input) {
+              console.error(`時段 ${slotIndex + 1}: 找不到輸入框`);
+              return { success: false, reason: 'no-input', customLocationValue: null };
+            }
+
+            // 有些站點會短暫設為 readonly/disabled，這裡強制解除一次
+            input.disabled = false;
+            input.readOnly = false;
+
+            // 滾到可見（避免某些框架對不可見元素忽略事件）
+            input.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+
+            // 就算 isInputReady 回 false，也先試著填 — 很多時候其實能寫
+            input.focus();
+            setNativeInputValue(input, customName);
+            input.blur();
+
+            // 驗證
+            const ok = input.value === customName;
+            console.log(`時段 ${slotIndex + 1}: 自訂地點填寫 ${ok ? '✅' : '❌'} "${customName}" -> "${input.value}"`);
+            return { success: ok, reason: ok ? 'filled' : 'value-mismatch', customLocationValue: input.value };
+          } catch (err) {
+            console.error(`時段 ${slotIndex + 1}: 填寫時發生錯誤:`, err);
+            return { success: false, reason: 'fill-error', customLocationValue: null, error: err?.message };
+          }
+        }
+
+        // 修復後的 fillModalByPayload 函數
         function fillModalByPayload(payload) {
           try {
             console.log("[ClassSync Fill] 開始填寫 Modal，payload:", payload);
@@ -219,11 +327,68 @@
                 const sel = selects[i];
                 const want = (d.slots[i] || "").trim();
                 const opts = Array.from(sel.options || []);
+                const selectContainer = sel.closest('.w-full') || sel.parentElement;
 
                 console.log(`[ClassSync Fill] 時段 ${i + 1}: 嘗試選擇 "${want}"`);
                 console.log(`[ClassSync Fill] 可用選項: [${opts.map(o => o.textContent?.trim()).join(', ')}]`);
 
-                // 尋找匹配的選項
+                // 檢查是否為「其他地點」的情況
+                const isCustomLocation = want && !opts.some(o =>
+                  ((o.value || "").trim() === want) ||
+                  ((o.textContent || "").trim() === want)
+                );
+
+                if (isCustomLocation) {
+                  console.log(`[ClassSync Fill] 時段 ${i + 1}: 檢測到自定義地點 "${want}"，使用自定義填寫邏輯`);
+
+                  try {
+                    const customResult = await fillCustomLocation(selectContainer, want, i);
+
+                    dayDetails.slots.push({
+                      index: i,
+                      wanted: want,
+                      selected: customResult.customLocationValue || want,
+                      value: "其他地點",
+                      success: customResult.success,
+                      isCustomLocation: true
+                    });
+
+                    if (!customResult.success) {
+                      dayFilled = false;
+                      result.errors.push({
+                        date: d.dateISO,
+                        idx: i,
+                        err: "custom-location-failed",
+                        wanted: want,
+                        customResult: customResult
+                      });
+                    }
+
+                    continue;
+                  } catch (error) {
+                    console.error(`[ClassSync Fill] ❌ 時段 ${i + 1}: 自定義地點填寫錯誤:`, error);
+                    dayFilled = false;
+                    result.errors.push({
+                      date: d.dateISO,
+                      idx: i,
+                      err: "custom-location-error",
+                      wanted: want,
+                      error: error.message
+                    });
+
+                    dayDetails.slots.push({
+                      index: i,
+                      wanted: want,
+                      selected: null,
+                      value: null,
+                      success: false,
+                      isCustomLocation: true
+                    });
+                    continue;
+                  }
+                }
+
+                // 尋找匹配的選項（非自定義地點）
                 let target = opts.find(o =>
                   ((o.value || "").trim() === want) ||
                   ((o.textContent || "").trim() === want)
@@ -358,6 +523,24 @@
 
             const result = fillModalByPayload(payload);
             addTestResult('正常 Payload 測試', result, result.ok && typeof result.successRate === 'number');
+        }
+
+        function testCustomLocationPayload() {
+            const payload = {
+                days: [
+                    {
+                        dateISO: "2024-09-16",
+                        slots: ["實習公司", "圖書館"]
+                    },
+                    {
+                        dateISO: "2024-09-17",
+                        slots: ["咖啡廳", "家裡"]
+                    }
+                ]
+            };
+
+            const result = fillModalByPayload(payload);
+            addTestResult('自定義地點 Payload 測試', result, result.ok && typeof result.successRate === 'number');
         }
 
         function testInvalidPayload() {

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClassSync 表單填寫測試</title>
+    <style>
+        .modal-box { background: #f5f5f5; padding: 20px; margin: 20px; border-radius: 8px; }
+        .bg-base-100 { background: white; border-radius: 8px; }
+        .p-4 { padding: 16px; }
+        .space-y-4 > * + * { margin-top: 16px; }
+        .text-xl { font-size: 1.25rem; }
+        .text-primary { color: #3b82f6; }
+        .grid { display: grid; }
+        .grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
+        .gap-4 { gap: 16px; }
+        .w-full { width: 100%; }
+        .select, .input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .select-sm { padding: 6px; }
+        .input-sm { padding: 6px; }
+        .mt-2 { margin-top: 8px; }
+        .btn { padding: 8px 16px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .btn:hover { background: #2563eb; }
+        .divide-y > * + * { border-top: 1px solid #e5e7eb; }
+        .modal-action { display: flex; justify-content: space-between; margin-top: 20px; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div id="test-container">
+        <h1>ClassSync 自訂地點填寫測試</h1>
+
+        <!-- 模擬用戶提供的 modal 結構 -->
+        <div class="modal-box sm:max-w-sm bg-base-200">
+            <div class="mt-4 divide-y rounded-lg bg-base-100">
+                <div class="p-4 space-y-4">
+                    <p class="text-xl text-primary">2025-09-22 (一)</p>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地" selected>吉林基地</option>
+                                <option value="在家中">在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中" selected>在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-4 space-y-4">
+                    <p class="text-xl text-primary">2025-09-23 (二)</p>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地" selected>弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中">在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中" selected>在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-4 space-y-4">
+                    <p class="text-xl text-primary">2025-09-24 (三)</p>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中" selected>在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中">在家中</option>
+                                <option value="其他地點" selected>其他地點</option>
+                            </select>
+                            <input type="text" class="w-full mt-2 text-base font-normal input input-sm input-bordered" placeholder="請填寫地點名稱" value="" data-listener-added_60d668f6="true">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-4 space-y-4">
+                    <p class="text-xl text-primary">2025-09-25 (四)</p>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地" selected>吉林基地</option>
+                                <option value="在家中">在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地" selected>弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中">在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-4 space-y-4">
+                    <p class="text-xl text-primary">2025-09-26 (五)</p>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中">在家中</option>
+                                <option value="其他地點" selected>其他地點</option>
+                            </select>
+                            <input type="text" class="w-full mt-2 text-base font-normal input input-sm input-bordered" placeholder="請填寫地點名稱" value="">
+                        </div>
+                        <div class="w-full">
+                            <select class="w-full py-0 text-base font-normal select select-sm select-bordered">
+                                <option disabled="" value="none">選取地點</option>
+                                <option value="弘道基地">弘道基地</option>
+                                <option value="吉林基地">吉林基地</option>
+                                <option value="在家中" selected>在家中</option>
+                                <option value="其他地點">其他地點</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="justify-between modal-action">
+                <button class="btn btn-square btn-neutral" onclick="resetForm()">重置</button>
+                <button class="btn btn-neutral" onclick="testFillForm()">
+                    <span class="font-normal normal-case">測試填寫</span>
+                </button>
+            </div>
+        </div>
+
+        <div id="test-results" style="margin-top: 20px; padding: 20px; background: #f9f9f9; border-radius: 8px;">
+            <h3>測試結果</h3>
+            <div id="result-content">點擊「測試填寫」按鈕開始測試</div>
+        </div>
+    </div>
+
+    <script>
+        // 修復後的自定義地點填寫相關函數
+
+        // 比原本「寬高>0」更穩定：看 computedStyle 與禁用態
+        function isInputReady(input) {
+          if (!input) return false;
+          const cs = getComputedStyle(input);
+          const visible = cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+          return visible && !input.disabled && !input.readOnly;
+        }
+
+        // 用原生 setter 寫值，解決 React/受控輸入不同步
+        function setNativeInputValue(input, value) {
+          const proto = Object.getPrototypeOf(input);
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          const setter = desc && desc.set;
+          if (setter) {
+            setter.call(input, value);
+          } else {
+            // 理論上不會走到這，但保底
+            input.value = value;
+          }
+          // 對受控元件，input 事件是關鍵
+          input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+        }
+
+        // 等待/取得該 slot 的自訂輸入框：優先用 MutationObserver，退而求其次輪詢
+        function getOrWaitCustomInput(container, select, maxWaitMs = 3000) {
+          return new Promise((resolve) => {
+            // 先查一次
+            const q = () => container?.querySelector('input[type="text"], input[placeholder*="地點"], input[placeholder*="名稱"], input.input');
+            let found = q();
+            if (found) return resolve(found);
+
+            // 確保 select 已是「其他地點」
+            if (select && select.value !== '其他地點') {
+              select.value = '其他地點';
+              select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+              select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+            }
+
+            // 用 MutationObserver 等待輸入框出現
+            const obs = new MutationObserver(() => {
+              const el = q();
+              if (el) {
+                obs.disconnect();
+                resolve(el);
+              }
+            });
+            if (container) {
+              obs.observe(container, { childList: true, subtree: true });
+            }
+
+            // 兜底 timeout
+            setTimeout(() => {
+              obs.disconnect();
+              resolve(q() || null);
+            }, maxWaitMs);
+          });
+        }
+
+        async function fillCustomLocation(container, customName, slotIndex) {
+          console.log(`測試填寫自訂地點: 時段 ${slotIndex + 1}, 地點: "${customName}"`);
+          try {
+            const select = container?.querySelector('select');
+
+            // 確保「其他地點」已選
+            if (select && select.value !== '其他地點') {
+              select.value = '其他地點';
+              select.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+              select.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+            }
+
+            // 取得或等待 input
+            const input = await getOrWaitCustomInput(container, select, 3000);
+
+            if (!input) {
+              console.error(`時段 ${slotIndex + 1}: 找不到輸入框`);
+              return { success: false, reason: 'no-input', customLocationValue: null };
+            }
+
+            // 有些站點會短暫設為 readonly/disabled，這裡強制解除一次
+            input.disabled = false;
+            input.readOnly = false;
+
+            // 滾到可見（避免某些框架對不可見元素忽略事件）
+            input.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+
+            // 就算 isInputReady 回 false，也先試著填 — 很多時候其實能寫
+            input.focus();
+            setNativeInputValue(input, customName);
+            input.blur();
+
+            // 驗證
+            const ok = input.value === customName;
+            console.log(`時段 ${slotIndex + 1}: 自訂地點填寫 ${ok ? '✅' : '❌'} "${customName}" -> "${input.value}"`);
+            return { success: ok, reason: ok ? 'filled' : 'value-mismatch', customLocationValue: input.value };
+          } catch (err) {
+            console.error(`時段 ${slotIndex + 1}: 填寫時發生錯誤:`, err);
+            return { success: false, reason: 'fill-error', customLocationValue: null, error: err?.message };
+          }
+        }
+
+
+        async function testFillForm() {
+            const resultDiv = document.getElementById('result-content');
+            resultDiv.innerHTML = '開始測試填寫...';
+
+            const testPayload = {
+                version: "1.0",
+                weekStartISO: "2025-09-22",
+                days: [
+                    { dateISO: "2025-09-22", slots: ["吉林基地", "在家中"] },
+                    { dateISO: "2025-09-23", slots: ["弘道基地", "在家中"] },
+                    { dateISO: "2025-09-24", slots: ["在家中", { location: "其他地點", customName: "實習公司" }] },
+                    { dateISO: "2025-09-25", slots: ["吉林基地", "弘道基地"] },
+                    { dateISO: "2025-09-26", slots: [{ location: "其他地點", customName: "圖書館" }, "在家中"] }
+                ],
+                placeWhitelist: ["弘道基地", "吉林基地", "在家中", "其他地點"]
+            };
+
+            const results = [];
+            let successCount = 0;
+
+            for (let dayIndex = 0; dayIndex < testPayload.days.length; dayIndex++) {
+                const day = testPayload.days[dayIndex];
+                const dateElements = document.querySelectorAll('.text-primary');
+                const dayContainer = dateElements[dayIndex]?.closest('.p-4');
+
+                if (!dayContainer) continue;
+
+                const selects = dayContainer.querySelectorAll('select');
+
+                for (let slotIndex = 0; slotIndex < day.slots.length; slotIndex++) {
+                    const slot = day.slots[slotIndex];
+                    const select = selects[slotIndex];
+
+                    if (!select) continue;
+
+                    let normalizedSlot;
+                    if (typeof slot === 'string') {
+                        normalizedSlot = { location: slot, customName: null, isCustom: false };
+                    } else {
+                        normalizedSlot = { ...slot, isCustom: true };
+                    }
+
+                    // 設置下拉選單值
+                    select.value = normalizedSlot.location;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+
+                    let customLocationResult = { success: true, customLocationValue: null };
+
+                    // 如果是自訂地點，處理 input 欄位
+                    if (normalizedSlot.isCustom && select.value === "其他地點") {
+                        const container = select.closest('.w-full');
+                        customLocationResult = await fillCustomLocation(container, normalizedSlot.customName, slotIndex);
+                    }
+
+                    const overallSuccess = customLocationResult.success;
+                    if (overallSuccess) successCount++;
+
+                    results.push({
+                        day: day.dateISO,
+                        slot: slotIndex + 1,
+                        target: normalizedSlot,
+                        success: overallSuccess,
+                        customResult: customLocationResult
+                    });
+                }
+            }
+
+            // 顯示結果
+            const successRate = (successCount / (testPayload.days.length * 2) * 100).toFixed(1);
+            let resultHTML = `<h4>測試完成！成功率: ${successRate}% (${successCount}/${testPayload.days.length * 2})</h4>`;
+
+            resultHTML += '<div style="max-height: 300px; overflow-y: auto;">';
+            results.forEach(result => {
+                const statusIcon = result.success ? '✅' : '❌';
+                resultHTML += `<div style="margin: 5px 0; padding: 5px; background: ${result.success ? '#e8f5e8' : '#fee'}; border-radius: 4px;">
+                    ${statusIcon} ${result.day} 時段${result.slot}: ${JSON.stringify(result.target)}
+                    ${result.customResult.customLocationValue ? ` -> "${result.customResult.customLocationValue}"` : ''}
+                    ${!result.success ? ` (${result.customResult.reason})` : ''}
+                </div>`;
+            });
+            resultHTML += '</div>';
+
+            resultDiv.innerHTML = resultHTML;
+        }
+
+        function resetForm() {
+            // 重置所有下拉選單為預設狀態
+            const selects = document.querySelectorAll('select');
+            selects.forEach(select => {
+                select.value = 'none';
+            });
+
+            // 清空所有輸入框
+            const inputs = document.querySelectorAll('input[type="text"]');
+            inputs.forEach(input => {
+                input.value = '';
+            });
+
+            document.getElementById('result-content').innerHTML = '點擊「測試填寫」按鈕開始測試';
+        }
+
+        // 模擬選擇其他地點時顯示輸入框
+        document.addEventListener('change', function(e) {
+            if (e.target.tagName === 'SELECT') {
+                const container = e.target.closest('.w-full');
+                let existingInput = container.querySelector('input[type="text"]');
+
+                if (e.target.value === '其他地點') {
+                    if (!existingInput) {
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.className = 'w-full mt-2 text-base font-normal input input-sm input-bordered';
+                        input.placeholder = '請填寫地點名稱';
+                        input.value = '';
+                        container.appendChild(input);
+                    }
+                } else {
+                    if (existingInput) {
+                        existingInput.remove();
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
