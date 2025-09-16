@@ -459,236 +459,502 @@ function clickWeeklyReportButton() {
   return false;
 }
 
-// tschoolkit（彈窗）：依 payload 填值 - 增強版本
+// tschoolkit（彈窗）：依 payload 填值（支援自定義地點與完整診斷）
 async function fillModalByPayload(payload) {
-  try {
-    console.log("[ClassSync Fill] 開始填寫 Modal，payload:", payload);
+  const PREFIX = "[ClassSync Fill]";
+  const log = (...args) => console.log(PREFIX, ...args);
+  const warn = (...args) => console.warn(PREFIX, ...args);
+  const error = (...args) => console.error(PREFIX, ...args);
 
-    // 檢查執行環境
-    if (typeof document === 'undefined') {
-      console.error("[ClassSync Fill] ❌ Document 物件不存在，執行環境異常");
-      return {
-        ok: false,
-        reason: "no-document",
-        details: "Document object not available",
-        filledDays: 0,
-        totalDays: payload?.days?.length || 0,
-        errors: [{ err: "no-document", details: "Document object not available" }],
-        successRate: 0
-      };
-    }
-
-    // 檢查 payload 有效性
-    if (!payload || !payload.days || !Array.isArray(payload.days)) {
-      console.error("[ClassSync Fill] ❌ 無效的 payload 格式");
-      return {
-        ok: false,
-        reason: "invalid-payload",
-        details: "Invalid payload format",
-        filledDays: 0,
-        totalDays: 0,
-        errors: [{ err: "invalid-payload", details: "Payload is null or missing days array" }],
-        successRate: 0
-      };
-    }
-
-    // 檢查 modal 容器
-    const modal = document.querySelector(".modal-box") || document.querySelector('[role="dialog"], .modal');
-    if (!modal) {
-      console.error("[ClassSync Fill] ❌ 找不到 modal 容器");
-      return {
-        ok: false,
-        reason: "no-modal",
-        details: "Modal element not found",
-        filledDays: 0,
-        totalDays: payload.days.length,
-        errors: [{ err: "no-modal", details: "Modal element not found" }],
-        successRate: 0
-      };
-    }
-
-    console.log("[ClassSync Fill] ✅ 找到 modal 容器");
-
-    // 檢查 modal 是否可見
-    if (modal.offsetWidth === 0 || modal.offsetHeight === 0) {
-      console.error("[ClassSync Fill] ❌ Modal 不可見");
-      return {
-        ok: false,
-        reason: "modal-not-visible",
-        details: "Modal is not visible",
-        filledDays: 0,
-        totalDays: payload.days.length,
-        errors: [{ err: "modal-not-visible", details: "Modal is not visible" }],
-        successRate: 0
-      };
-    }
-
-  const result = {
-    ok: true,
-    filledDays: 0,
-    totalDays: payload.days.length,
-    errors: [],
-    details: []
+  const buildFailure = (reason, details, extra = {}) => {
+    return {
+      ok: false,
+      reason,
+      details,
+      filledDays: 0,
+      totalDays: payload?.days?.length || 0,
+      errors: [
+        {
+          err: reason,
+          details,
+          ...extra,
+        },
+      ],
+      successRate: 0,
+    };
   };
 
-  // 每天一個 block：<div class="p-4 space-y-4">
-  const blocks = Array.from(modal.querySelectorAll(".p-4.space-y-4"));
-  console.log(`[ClassSync Fill] 找到 ${blocks.length} 個日期區塊`);
+  const normalizeSlot = (slot) => {
+    const toTrimmedString = (value) =>
+      typeof value === "string" ? value.trim() : value == null ? "" : String(value).trim();
 
-  if (!blocks.length) {
-    console.error("[ClassSync Fill] ❌ 找不到日期區塊");
-    return { ok: false, reason: "no-day-blocks", details: "No day blocks found in modal" };
-  }
-
-  // 建立日期對應表
-  const blockByDate = new Map();
-  blocks.forEach((block, index) => {
-    const title = block.querySelector("p.text-xl.text-primary");
-    const txt = (title?.textContent || "").trim();
-    const dateStr = txt.slice(0, 10);
-    blockByDate.set(dateStr, block);
-    console.log(`[ClassSync Fill] 區塊 ${index + 1}: ${txt} -> ${dateStr}`);
-  });
-
-  // 逐日填寫
-  for (const d of payload.days) {
-    console.log(`[ClassSync Fill] 處理日期: ${d.dateISO}, 地點: [${d.slots.join(', ')}]`);
-
-    const block = blockByDate.get(d.dateISO);
-    if (!block) {
-      const error = { date: d.dateISO, err: "block-not-found" };
-      result.errors.push(error);
-      console.error(`[ClassSync Fill] ❌ 找不到日期區塊: ${d.dateISO}`);
-      continue;
+    if (!slot || (Array.isArray(slot) && slot.length === 0)) {
+      return {
+        location: "",
+        customName: null,
+        isCustom: false,
+        raw: slot,
+      };
     }
 
-    const selects = Array.from(block.querySelectorAll("select"));
-    console.log(`[ClassSync Fill] 日期 ${d.dateISO} 找到 ${selects.length} 個下拉選單`);
-
-    if (!selects.length) {
-      const error = { date: d.dateISO, err: "no-selects" };
-      result.errors.push(error);
-      console.error(`[ClassSync Fill] ❌ 日期 ${d.dateISO} 找不到下拉選單`);
-      continue;
+    if (typeof slot === "object" && !Array.isArray(slot)) {
+      const location = toTrimmedString(slot.location || slot.place || "");
+      const customName = toTrimmedString(slot.customName || slot.custom || "");
+      const isCustom = Boolean(slot.isCustom ?? location === "其他地點" || customName);
+      return {
+        location,
+        customName: customName || null,
+        isCustom,
+        raw: slot,
+      };
     }
 
-    let dayFilled = true;
-    const dayDetails = { date: d.dateISO, slots: [] };
+    const rawText = toTrimmedString(slot);
+    const delimiterIndex = (() => {
+      const standard = rawText.indexOf(":");
+      const fullWidth = rawText.indexOf("：");
+      if (standard >= 0 && fullWidth >= 0) {
+        return Math.min(standard, fullWidth);
+      }
+      return standard >= 0 ? standard : fullWidth;
+    })();
 
-    // 填寫每個時段
-    for (let i = 0; i < Math.min(selects.length, d.slots.length); i++) {
-      const sel = selects[i];
-      const want = (d.slots[i] || "").trim();
-      const opts = Array.from(sel.options || []);
+    if (delimiterIndex >= 0) {
+      const prefix = rawText.slice(0, delimiterIndex).trim();
+      const suffix = rawText.slice(delimiterIndex + 1).trim();
+      const isCustom = prefix === "其他地點" || Boolean(suffix);
+      return {
+        location: prefix || "其他地點",
+        customName: suffix || null,
+        isCustom,
+        raw: slot,
+      };
+    }
 
-      console.log(`[ClassSync Fill] 時段 ${i + 1}: 嘗試選擇 "${want}"`);
-      console.log(`[ClassSync Fill] 可用選項: [${opts.map(o => o.textContent?.trim()).join(', ')}]`);
+    return {
+      location: rawText,
+      customName: null,
+      isCustom: rawText === "其他地點",
+      raw: slot,
+    };
+  };
 
+  const isElementVisible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const style = window.getComputedStyle(el);
+    return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
+  };
 
-      // 尋找匹配的選項
-      let target = opts.find(o =>
-        ((o.value || "").trim() === want) ||
-        ((o.textContent || "").trim() === want)
-      );
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-      if (!target) {
-        // 嘗試模糊匹配
-        target = opts.find(o => {
-          const optText = (o.textContent || "").trim();
-          return optText.includes(want) || want.includes(optText);
+  const findModal = () => {
+    const selectors = [
+      "#next-week-event-modal .modal-box",
+      ".modal.modal-open .modal-box",
+      ".modal-box",
+      "[role=\"dialog\"] .modal-box",
+      "[role=\"dialog\"]",
+    ];
+
+    for (const selector of selectors) {
+      const candidate = document.querySelector(selector);
+      if (candidate) {
+        if (candidate.classList?.contains("modal-box")) {
+          return candidate;
+        }
+        const nested = candidate.querySelector?.(".modal-box");
+        if (nested) return nested;
+        return candidate;
+      }
+    }
+    return null;
+  };
+
+  const gatherCustomInputsNearSelect = (selectEl) => {
+    const candidates = [];
+    const seen = new Set();
+    const pushCandidate = (node) => {
+      if (!node) return;
+      if (!(node instanceof HTMLElement)) return;
+      if (seen.has(node)) return;
+      if (node.matches("input,textarea")) {
+        const input = node;
+        if (
+          input.tagName === "INPUT" &&
+          (input.type === "" || input.type === "text") &&
+          !input.disabled &&
+          !input.readOnly &&
+          isElementVisible(input)
+        ) {
+          seen.add(input);
+          candidates.push(input);
+        }
+      }
+      if (node !== selectEl && node.querySelector) {
+        node.querySelectorAll("input[type=\"text\"],input:not([type])").forEach((child) => {
+          if (
+            child.tagName === "INPUT" &&
+            (child.type === "" || child.type === "text") &&
+            !child.disabled &&
+            !child.readOnly &&
+            isElementVisible(child)
+          ) {
+            if (!seen.has(child)) {
+              seen.add(child);
+              candidates.push(child);
+            }
+          }
         });
       }
+    };
 
-      if (!target) {
-        // 使用第一個有效選項
-        target = opts.find(o =>
-          !o.disabled &&
-          o.value &&
-          o.value !== "none" &&
-          o.value !== "" &&
-          (o.textContent || "").trim() !== ""
-        );
+    pushCandidate(selectEl.nextElementSibling);
+    const container = selectEl.closest(".w-full, .slot-container");
+    if (container) pushCandidate(container);
+    const block = selectEl.closest(".p-4.space-y-4, [data-day-block]");
+    if (block) pushCandidate(block);
+    const modal = selectEl.closest(".modal-box") || findModal();
+    if (modal) pushCandidate(modal);
+
+    const filtered = candidates.filter((input) => {
+      const position = selectEl.compareDocumentPosition(input);
+      const isFollowing =
+        position & Node.DOCUMENT_POSITION_FOLLOWING ||
+        position == Node.DOCUMENT_POSITION_EQUAL;
+      return isFollowing;
+    });
+
+    const selectRect = selectEl.getBoundingClientRect();
+    filtered.sort((a, b) => {
+      const rectA = a.getBoundingClientRect();
+      const rectB = b.getBoundingClientRect();
+      const distanceA = Math.hypot(
+        rectA.left + rectA.width / 2 - (selectRect.left + selectRect.width / 2),
+        rectA.top + rectA.height / 2 - (selectRect.top + selectRect.height / 2)
+      );
+      const distanceB = Math.hypot(
+        rectB.left + rectB.width / 2 - (selectRect.left + selectRect.width / 2),
+        rectB.top + rectB.height / 2 - (selectRect.top + selectRect.height / 2)
+      );
+      return distanceA - distanceB;
+    });
+
+    return filtered;
+  };
+
+  const waitForCustomInput = async (selectEl, slotMeta, { maxWait = 2000, interval = 120 } = {}) => {
+    const start = performance.now();
+    let attempts = 0;
+    while (performance.now() - start <= maxWait) {
+      const candidates = gatherCustomInputsNearSelect(selectEl);
+      if (candidates.length > 0) {
+        return { input: candidates[0], attempts };
+      }
+      await wait(interval);
+      attempts += 1;
+    }
+    warn(
+      `時段 ${slotMeta.slotIndex + 1}: 已等待 ${maxWait}ms 仍找不到自定義輸入框`,
+      slotMeta
+    );
+    return { input: null, attempts };
+  };
+
+  try {
+    log("開始填寫 Modal，payload:", payload);
+
+    if (typeof document === "undefined") {
+      error("Document 物件不存在，執行環境異常");
+      return buildFailure("no-document", "Document object not available");
+    }
+
+    if (!payload || !Array.isArray(payload.days)) {
+      error("無效的 payload 格式");
+      return buildFailure("invalid-payload", "Invalid payload format", { payload });
+    }
+
+    const modal = findModal();
+    if (!modal) {
+      error("找不到 modal 容器");
+      return buildFailure("no-modal", "Modal element not found");
+    }
+
+    if (!isElementVisible(modal)) {
+      error("Modal 不可見");
+      return buildFailure("modal-not-visible", "Modal is not visible");
+    }
+
+    log("✅ 找到 modal 容器:", modal);
+
+    const blocks = Array.from(modal.querySelectorAll(".p-4.space-y-4"));
+    if (!blocks.length) {
+      error("找不到日期區塊");
+      return buildFailure("no-day-blocks", "No day blocks found in modal");
+    }
+
+    log(`找到 ${blocks.length} 個日期區塊`);
+
+    const blockByDate = new Map();
+    blocks.forEach((block, index) => {
+      const title = block.querySelector("p.text-xl.text-primary, h3, header");
+      const text = (title?.textContent || "").trim();
+      const dateText = text.slice(0, 10);
+      blockByDate.set(dateText, block);
+      log(`區塊 ${index + 1}: ${text} -> ${dateText}`);
+    });
+
+    const placeWhitelist = Array.isArray(payload.placeWhitelist) ? payload.placeWhitelist : null;
+    const normalizedDays = payload.days.map((day, dayIndex) => ({
+      dateISO: day.dateISO,
+      dayIndex,
+      slots: Array.isArray(day.slots)
+        ? day.slots.map((slot, slotIndex) => {
+            const normalized = normalizeSlot(slot);
+            normalized.dayIndex = dayIndex;
+            normalized.slotIndex = slotIndex;
+            return normalized;
+          })
+        : [],
+    }));
+
+    const result = {
+      ok: true,
+      filledDays: 0,
+      totalDays: normalizedDays.length,
+      errors: [],
+      details: [],
+      successRate: 0,
+    };
+
+    for (const day of normalizedDays) {
+      log(`處理日期: ${day.dateISO}, 地點: [${day.slots.map((s) => s.customName ? `${s.location}:${s.customName}` : s.location).join(", ")}]`);
+
+      const block = blockByDate.get(day.dateISO);
+      if (!block) {
+        const errorEntry = { date: day.dateISO, err: "block-not-found" };
+        result.errors.push(errorEntry);
+        error(`❌ 找不到日期區塊: ${day.dateISO}`);
+        continue;
       }
 
-      if (target) {
-        sel.value = target.value;
-        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      const selects = Array.from(block.querySelectorAll("select"));
+      log(`日期 ${day.dateISO} 找到 ${selects.length} 個下拉選單`);
 
-        // 驗證是否設定成功
-        const afterValue = sel.value;
-        const success = afterValue === target.value;
+      if (!selects.length) {
+        const errorEntry = { date: day.dateISO, err: "no-selects" };
+        result.errors.push(errorEntry);
+        error(`❌ 日期 ${day.dateISO} 找不到下拉選單`);
+        continue;
+      }
 
-        console.log(`[ClassSync Fill] 時段 ${i + 1}: ${success ? '✅' : '❌'} ${want} -> ${target.textContent?.trim()} (value: ${target.value})`);
+      let dayFilled = true;
+      const dayDetails = { date: day.dateISO, slots: [] };
+
+      for (let i = 0; i < Math.min(selects.length, day.slots.length); i++) {
+        const selectEl = selects[i];
+        const slotInfo = day.slots[i];
+        const options = Array.from(selectEl.options || []);
+        const slotLabel = slotInfo.customName
+          ? `${slotInfo.location}:${slotInfo.customName}`
+          : slotInfo.location;
+
+        log(`時段 ${i + 1}: 原始 slot 資料:`, slotInfo.raw);
+        log(`時段 ${i + 1}: 標準化後的 slot:`, slotInfo);
+        log(
+          `時段 ${i + 1}: 可用選項: [${options
+            .map((opt) => `"${(opt.value || "").trim()}": "${(opt.textContent || "").trim()}"`)
+            .join(", ""))}]`
+        );
+
+        if (
+          placeWhitelist &&
+          slotInfo.location &&
+          !slotInfo.isCustom &&
+          !placeWhitelist.includes(slotInfo.location)
+        ) {
+          warn(
+            `時段 ${i + 1}: "${slotInfo.location}" 不在允許清單中，仍嘗試匹配`,
+            placeWhitelist
+          );
+        }
+
+        const findMatchingOption = () => {
+          const trimmed = (value) => (value == null ? "" : String(value).trim());
+          const targetText = trimmed(slotInfo.location);
+          let targetOption =
+            options.find(
+              (opt) =>
+                trimmed(opt.value) === targetText || trimmed(opt.textContent) === targetText
+            ) || null;
+
+          if (!targetOption && targetText) {
+            const lowerTarget = targetText.toLowerCase();
+            targetOption =
+              options.find((opt) => {
+                const text = trimmed(opt.textContent).toLowerCase();
+                const value = trimmed(opt.value).toLowerCase();
+                return text.includes(lowerTarget) || value.includes(lowerTarget);
+              }) || null;
+          }
+
+          if (!targetOption && !slotInfo.isCustom) {
+            targetOption =
+              options.find(
+                (opt) =>
+                  !opt.disabled &&
+                  opt.value &&
+                  opt.value !== "none" &&
+                  trimmed(opt.textContent) !== ""
+              ) || null;
+          }
+
+          return targetOption;
+        };
+
+        const targetOption = findMatchingOption();
+        if (!targetOption) {
+          const errorEntry = {
+            date: day.dateISO,
+            idx: i,
+            err: "option-not-found",
+            wanted: slotLabel,
+            availableOptions: options.map((opt) => opt.textContent?.trim()).filter(Boolean),
+          };
+          result.errors.push(errorEntry);
+          dayDetails.slots.push({
+            index: i,
+            wanted: slotLabel,
+            selected: null,
+            value: null,
+            success: false,
+          });
+          error(`❌ 時段 ${i + 1}: 找不到適合的選項給 "${slotLabel}"`);
+          dayFilled = false;
+          continue;
+        }
+
+        const previousValue = selectEl.value;
+        targetOption.selected = true;
+        selectEl.value = targetOption.value;
+        selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+        selectEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await wait(60);
+
+        let customInputResult = { success: true, value: null };
+        if (slotInfo.isCustom) {
+          const desiredName = slotInfo.customName || "";
+          const { input: customInput, attempts } = await waitForCustomInput(selectEl, slotInfo);
+          if (customInput) {
+            log(
+              `時段 ${i + 1}: 找到自定義輸入框（重試 ${attempts} 次）`,
+              customInput
+            );
+            const nativeSetter =
+              Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+            if (nativeSetter) {
+              customInput.focus();
+              nativeSetter.call(customInput, desiredName);
+              customInput.dispatchEvent(new InputEvent("input", { bubbles: true }));
+              customInput.dispatchEvent(new Event("change", { bubbles: true }));
+              customInput.blur();
+              await wait(120);
+            } else {
+              customInput.value = desiredName;
+              customInput.dispatchEvent(new Event("input", { bubbles: true }));
+              customInput.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+            customInputResult.value = customInput.value;
+            customInputResult.success = customInput.value.trim() === desiredName.trim();
+            log(
+              `時段 ${i + 1}: 自定義地點輸入 ${customInputResult.success ? "✅" : "❌"} "${desiredName}" -> "${customInputResult.value}"`
+            );
+            if (!customInputResult.success) {
+              warn(`時段 ${i + 1}: 自定義輸入框未成功設定值`, {
+                desiredName,
+                actualValue: customInputResult.value,
+              });
+            }
+          } else {
+            customInputResult.success = false;
+            result.errors.push({
+              date: day.dateISO,
+              idx: i,
+              err: "custom-input-not-found",
+              wanted: slotLabel,
+            });
+          }
+        }
+
+        const newValue = selectEl.value;
+        const selectSuccess = newValue === targetOption.value;
+        const slotSuccess = selectSuccess && customInputResult.success;
+
+        log(
+          `時段 ${i + 1}: ${slotSuccess ? "✅" : "❌"} "${slotLabel}" -> "${
+            targetOption.textContent?.trim() || targetOption.value
+          }" (${previousValue} -> ${newValue})`
+        );
 
         dayDetails.slots.push({
           index: i,
-          wanted: want,
-          selected: target.textContent?.trim(),
-          value: target.value,
-          success: success
+          wanted: slotLabel,
+          selected: targetOption.textContent?.trim() || targetOption.value,
+          value: targetOption.value,
+          oldValue: previousValue,
+          newValue,
+          customLocationValue: customInputResult.value,
+          success: slotSuccess,
         });
 
-        if (!success) {
+        if (!slotSuccess) {
           dayFilled = false;
           result.errors.push({
-            date: d.dateISO,
+            date: day.dateISO,
             idx: i,
-            err: "set-value-failed",
-            wanted: want,
-            attempted: target.value
+            err: !selectSuccess ? "set-value-failed" : "custom-location-failed",
+            wanted: slotLabel,
+            attempted: targetOption.value,
+            oldValue: previousValue,
+            newValue,
+            customValue: customInputResult.value,
           });
         }
-      } else {
-        console.error(`[ClassSync Fill] ❌ 時段 ${i + 1}: 找不到適合的選項給 "${want}"`);
-        dayFilled = false;
-        result.errors.push({
-          date: d.dateISO,
-          idx: i,
-          err: "option-not-found",
-          wanted: want,
-          availableOptions: opts.map(o => o.textContent?.trim()).filter(Boolean)
-        });
+      }
 
-        dayDetails.slots.push({
-          index: i,
-          wanted: want,
-          selected: null,
-          value: null,
-          success: false
-        });
+      result.details.push(dayDetails);
+      if (dayFilled) {
+        result.filledDays += 1;
       }
     }
 
-    result.details.push(dayDetails);
-    if (dayFilled) {
-      result.filledDays += 1;
-    }
-  }
+    result.successRate =
+      result.totalDays > 0 ? result.filledDays / result.totalDays : 0;
+    result.ok = result.errors.length === 0;
 
-  // 計算成功率
-  result.successRate = result.filledDays / result.totalDays;
-  result.ok = result.errors.length === 0;
-
-    console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`);
+    log(
+      `填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`
+    );
+    log("詳細結果:", result);
 
     return result;
-
-  } catch (error) {
-    console.error("[ClassSync Fill] ❌ 函數執行時發生未預期錯誤:", error);
-
-    // 確保總是返回一個有效的結果對象
+  } catch (err) {
+    error("函數執行時發生未預期錯誤:", err);
     return {
       ok: false,
       reason: "unexpected-error",
-      details: error.message || "Unknown error occurred",
+      details: err?.message || "Unknown error occurred",
       filledDays: 0,
       totalDays: payload?.days?.length || 0,
-      errors: [{
-        err: "unexpected-error",
-        details: error.message || "Unknown error occurred",
-        stack: error.stack
-      }],
-      successRate: 0
+      errors: [
+        {
+          err: "unexpected-error",
+          details: err?.message || "Unknown error occurred",
+          stack: err?.stack,
+        },
+      ],
+      successRate: 0,
     };
   }
 }
@@ -1143,13 +1409,37 @@ async function executeTschoolkitFlow(tabId) {
             }
 
             // 檢查 Modal 是否存在且可見
-            const modal = document.querySelector(".modal-box") || document.querySelector('[role="dialog"], .modal');
-            if (!modal) {
-              return { ok: false, reason: "no-modal" };
+            const modalSelectors = [
+              '#next-week-event-modal .modal-box',
+              '.modal.modal-open .modal-box',
+              '.modal-box',
+              '[role="dialog"] .modal-box',
+              '[role="dialog"]'
+            ];
+            let modal = null;
+            for (const selector of modalSelectors) {
+              const candidate = document.querySelector(selector);
+              if (!candidate) continue;
+              if (candidate.classList?.contains('modal-box')) {
+                modal = candidate;
+              } else {
+                modal = candidate.querySelector?.('.modal-box') || candidate;
+              }
+              if (modal) break;
             }
 
-            if (modal.offsetWidth === 0 || modal.offsetHeight === 0) {
-              return { ok: false, reason: "modal-not-visible" };
+            if (!modal) {
+              return { ok: false, reason: 'no-modal' };
+            }
+
+            const rect = modal.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) {
+              return { ok: false, reason: 'modal-not-visible' };
+            }
+
+            const modalStyle = window.getComputedStyle(modal);
+            if (modalStyle.visibility === 'hidden' || modalStyle.display === 'none' || modalStyle.opacity === '0') {
+              return { ok: false, reason: 'modal-not-visible' };
             }
 
             // 檢查日期區塊
@@ -1182,323 +1472,7 @@ async function executeTschoolkitFlow(tabId) {
       console.log(`[ClassSync] 步驟 ${fillAttempts}.2: 開始執行腳本注入`);
       const scriptResult = await chrome.scripting.executeScript({
         target: { tabId: tabId },
-        func: async (payload) => {
-          // 內聯的 fillModalByPayload 函數
-          try {
-            console.log("[ClassSync Fill] 開始填寫 Modal，payload:", payload);
-
-            // 檢查執行環境
-            if (typeof document === 'undefined') {
-              console.error("[ClassSync Fill] ❌ Document 物件不存在，執行環境異常");
-              return {
-                ok: false,
-                reason: "no-document",
-                details: "Document object not available",
-                filledDays: 0,
-                totalDays: payload?.days?.length || 0,
-                errors: [{ err: "no-document", details: "Document object not available" }],
-                successRate: 0
-              };
-            }
-
-            // 檢查 payload 有效性
-            if (!payload || !payload.days || !Array.isArray(payload.days)) {
-              console.error("[ClassSync Fill] ❌ 無效的 payload 格式");
-              return {
-                ok: false,
-                reason: "invalid-payload",
-                details: "Invalid payload format",
-                filledDays: 0,
-                totalDays: 0,
-                errors: [{ err: "invalid-payload", details: "Payload is null or missing days array" }],
-                successRate: 0
-              };
-            }
-
-            // 檢查 modal 容器 - 更新選擇器以匹配實際 HTML 結構
-            const modal = document.querySelector(".modal-box") ||
-                         document.querySelector('[role="dialog"]') ||
-                         document.querySelector('.modal') ||
-                         document.querySelector('#next-week-event-modal .modal-box');
-
-            if (!modal) {
-              console.error("[ClassSync Fill] ❌ 找不到 modal 容器");
-              return {
-                ok: false,
-                reason: "no-modal",
-                details: "Modal element not found",
-                filledDays: 0,
-                totalDays: payload.days.length,
-                errors: [{ err: "no-modal", details: "Modal element not found" }],
-                successRate: 0
-              };
-            }
-
-            console.log("[ClassSync Fill] ✅ 找到 modal 容器:", modal);
-
-            // 檢查 modal 是否可見
-            if (modal.offsetWidth === 0 || modal.offsetHeight === 0) {
-              console.error("[ClassSync Fill] ❌ Modal 不可見");
-              return {
-                ok: false,
-                reason: "modal-not-visible",
-                details: "Modal is not visible",
-                filledDays: 0,
-                totalDays: payload.days.length,
-                errors: [{ err: "modal-not-visible", details: "Modal is not visible" }],
-                successRate: 0
-              };
-            }
-
-            const result = {
-              ok: true,
-              filledDays: 0,
-              totalDays: payload.days.length,
-              errors: [],
-              details: []
-            };
-
-            // 找到日期區塊：<div class="p-4 space-y-4">
-            const blocks = Array.from(modal.querySelectorAll(".p-4.space-y-4"));
-            console.log(`[ClassSync Fill] 找到 ${blocks.length} 個日期區塊`);
-
-            if (!blocks.length) {
-              console.error("[ClassSync Fill] ❌ 找不到日期區塊");
-              return {
-                ok: false,
-                reason: "no-day-blocks",
-                details: "No day blocks found in modal",
-                filledDays: 0,
-                totalDays: payload.days.length,
-                errors: [{ err: "no-day-blocks", details: "No day blocks found in modal" }],
-                successRate: 0
-              };
-            }
-
-            // 建立日期對應表
-            const blockByDate = new Map();
-            blocks.forEach((block, index) => {
-              const title = block.querySelector("p.text-xl.text-primary");
-              const txt = (title?.textContent || "").trim();
-              const dateStr = txt.slice(0, 10); // 提取 YYYY-MM-DD 格式
-              blockByDate.set(dateStr, block);
-              console.log(`[ClassSync Fill] 區塊 ${index + 1}: ${txt} -> ${dateStr}`);
-            });
-
-            // 逐日填寫
-            for (const d of payload.days) {
-              console.log(`[ClassSync Fill] 處理日期: ${d.dateISO}, 地點: [${d.slots.join(', ')}]`);
-
-              const block = blockByDate.get(d.dateISO);
-              if (!block) {
-                const error = { date: d.dateISO, err: "block-not-found" };
-                result.errors.push(error);
-                console.error(`[ClassSync Fill] ❌ 找不到日期區塊: ${d.dateISO}`);
-                continue;
-              }
-
-              const selects = Array.from(block.querySelectorAll("select"));
-              console.log(`[ClassSync Fill] 日期 ${d.dateISO} 找到 ${selects.length} 個下拉選單`);
-
-              if (!selects.length) {
-                const error = { date: d.dateISO, err: "no-selects" };
-                result.errors.push(error);
-                console.error(`[ClassSync Fill] ❌ 日期 ${d.dateISO} 找不到下拉選單`);
-                continue;
-              }
-
-              let dayFilled = true;
-              const dayDetails = { date: d.dateISO, slots: [] };
-
-              // 填寫每個時段
-              for (let i = 0; i < Math.min(selects.length, d.slots.length); i++) {
-                const sel = selects[i];
-                const want = (d.slots[i] || "").trim();
-                const opts = Array.from(sel.options || []);
-
-                console.log(`[ClassSync Fill] 時段 ${i + 1}: 嘗試選擇 "${want}"`);
-                console.log(`[ClassSync Fill] 可用選項: [${opts.map(o => `"${o.value}": "${o.textContent?.trim()}"`).join(', ')}]`);
-
-                // 尋找匹配的選項 - 優先匹配 textContent
-                let target = opts.find(o => {
-                  const optText = (o.textContent || "").trim();
-                  const optValue = (o.value || "").trim();
-                  return optText === want || optValue === want;
-                });
-
-                if (!target) {
-                  // 嘗試模糊匹配
-                  target = opts.find(o => {
-                    const optText = (o.textContent || "").trim();
-                    return optText.includes(want) || want.includes(optText);
-                  });
-                }
-
-                if (!target) {
-                  // 如果找不到匹配，使用第一個非 disabled 的有效選項
-                  target = opts.find(o =>
-                    !o.disabled &&
-                    o.value &&
-                    o.value !== "none" &&
-                    o.value !== "" &&
-                    (o.textContent || "").trim() !== ""
-                  );
-                }
-
-                if (target) {
-                  const oldValue = sel.value;
-
-                  // 同步選項狀態並觸發事件
-                  target.selected = true;
-                  sel.value = target.value;
-                  sel.dispatchEvent(new Event("change", { bubbles: true }));
-                  sel.dispatchEvent(new Event("input", { bubbles: true }));
-
-                  // 等待 DOM/框架更新
-                  await new Promise(r => setTimeout(r, 50));
-
-                  // 如果選擇的是「其他地點」，需要處理自定義輸入框
-                  let customLocationSuccess = true;
-                  let customLocationValue = null;
-
-                  if (target.value === "其他地點") {
-                    const container = sel.closest('.w-full');
-                    let customInput = null;
-                    let retryCount = 0;
-                    const maxRetries = 20;
-                    const interval = 150;
-
-                    while (!customInput && retryCount < maxRetries) {
-                      await new Promise(r => setTimeout(r, interval));
-                      customInput = container?.querySelector('input[type="text"]');
-                      retryCount++;
-                    }
-
-                    if (customInput) {
-                      console.log(`[ClassSync Fill] ✅ 找到動態輸入框（重試 ${retryCount - 1} 次）`);
-
-                      let customLocationName = want;
-                      if (want.includes(':')) {
-                        const parts = want.split(':');
-                        if (parts.length === 2 && parts[0].trim() === "其他地點") {
-                          customLocationName = parts[1].trim();
-                        }
-                      }
-
-                      console.log(`[ClassSync Fill] 時段 ${i + 1}: 填寫自定義地點輸入框 "${customLocationName}"`);
-
-                      if (customInput.offsetWidth > 0 && customInput.offsetHeight > 0 && !customInput.disabled) {
-                        customInput.focus();
-                        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                        nativeSetter.call(customInput, customLocationName);
-                        customInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-                        customInput.dispatchEvent(new Event('change', { bubbles: true }));
-                        customInput.blur();
-
-                        await new Promise(r => setTimeout(r, 150));
-                        customLocationValue = customInput.value;
-                        customLocationSuccess = customLocationValue === customLocationName;
-
-                        console.log(`[ClassSync Fill] 時段 ${i + 1}: 自定義地點輸入 ${customLocationSuccess ? '✅' : '❌'} "${customLocationName}" -> "${customLocationValue}"`);
-                      } else {
-                        console.warn(`[ClassSync Fill] 時段 ${i + 1}: 自定義輸入框不可編輯或不可見，outerHTML: ${customInput.outerHTML}`);
-                        customLocationSuccess = false;
-                      }
-                    } else {
-                      console.warn(`[ClassSync Fill] 時段 ${i + 1}: 選擇了「其他地點」但找不到自定義輸入框（${maxRetries}次重試）`);
-                      customLocationSuccess = false;
-                    }
-                  }
-
-                  // 驗證是否設定成功
-                  const newValue = sel.value;
-                  const selectSuccess = newValue === target.value;
-                  console.log(`[ClassSync Fill] 時段 ${i + 1}: 檢查選擇結果 old="${oldValue}" new="${newValue}" target="${target.value}"`);
-                  const overallSuccess = selectSuccess && customLocationSuccess;
-
-                  console.log(`[ClassSync Fill] 時段 ${i + 1}: ${overallSuccess ? '✅' : '❌'} "${want}" -> "${target.textContent?.trim()}" (${oldValue} -> ${newValue})${customLocationValue ? ` + 自定義地點: "${customLocationValue}"` : ''}`);
-
-                  dayDetails.slots.push({
-                    index: i,
-                    wanted: want,
-                    selected: target.textContent?.trim(),
-                    value: target.value,
-                    oldValue: oldValue,
-                    newValue: newValue,
-                    customLocationValue: customLocationValue,
-                    success: overallSuccess
-                  });
-
-                  if (!overallSuccess) {
-                    dayFilled = false;
-                    result.errors.push({
-                      date: d.dateISO,
-                      idx: i,
-                      err: selectSuccess ? "custom-location-failed" : "set-value-failed",
-                      wanted: want,
-                      attempted: target.value,
-                      oldValue: oldValue,
-                      newValue: newValue,
-                      customLocationValue: customLocationValue,
-                      selectSuccess: selectSuccess,
-                      customLocationSuccess: customLocationSuccess
-                    });
-                  }
-                } else {
-                  console.error(`[ClassSync Fill] ❌ 時段 ${i + 1}: 找不到適合的選項給 "${want}"`);
-                  dayFilled = false;
-                  result.errors.push({
-                    date: d.dateISO,
-                    idx: i,
-                    err: "option-not-found",
-                    wanted: want,
-                    availableOptions: opts.map(o => `"${o.value}": "${o.textContent?.trim()}"`).filter(Boolean)
-                  });
-
-                  dayDetails.slots.push({
-                    index: i,
-                    wanted: want,
-                    selected: null,
-                    value: null,
-                    success: false
-                  });
-                }
-              }
-
-              result.details.push(dayDetails);
-              if (dayFilled) {
-                result.filledDays += 1;
-              }
-            }
-
-            // 計算成功率
-            result.successRate = result.totalDays > 0 ? result.filledDays / result.totalDays : 0;
-            result.ok = result.errors.length === 0;
-
-            console.log(`[ClassSync Fill] 填寫完成: ${result.filledDays}/${result.totalDays} 天成功，錯誤數 ${result.errors.length}`);
-            console.log(`[ClassSync Fill] 詳細結果:`, result);
-
-            return result;
-
-          } catch (error) {
-            console.error("[ClassSync Fill] ❌ 函數執行時發生未預期錯誤:", error);
-
-            // 確保總是返回一個有效的結果對象
-            return {
-              ok: false,
-              reason: "unexpected-error",
-              details: error.message || "Unknown error occurred",
-              filledDays: 0,
-              totalDays: payload?.days?.length || 0,
-              errors: [{
-                err: "unexpected-error",
-                details: error.message || "Unknown error occurred",
-                stack: error.stack
-              }],
-              successRate: 0
-            };
-          }
-        },
+        func: fillModalByPayload,
         args: [payload],
         world: "MAIN"
       });
