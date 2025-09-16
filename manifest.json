@@ -18,7 +18,7 @@
                 "<all_urls>"
             ],
             "js": [
-                "content.js"
+                "src/content/bridge.js"
             ],
             "run_at": "document_start"
         }
@@ -32,13 +32,14 @@
     },
     "action": {
         "default_title": "一鍵填寫學習週曆",
-        "default_popup": "popup.html"
+        "default_popup": "src/ui/index.html"
     },
     "background": {
-        "service_worker": "background.js"
+        "service_worker": "src/background/index.js",
+        "type": "module"
     },
     "options_ui": {
-        "page": "options.html",
+        "page": "src/options/index.html",
         "open_in_tab": true
     }
 }
