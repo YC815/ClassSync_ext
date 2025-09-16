@@ -12,7 +12,8 @@
 
   "host_permissions": [
     "https://tschoolkit.web.app/*",
-    "https://asia-east1-campus-lite.cloudfunctions.net/*"
+    "https://asia-east1-campus-lite.cloudfunctions.net/*",
+    "https://cst.zeabur.app/*"
   ],
 
   "background": {

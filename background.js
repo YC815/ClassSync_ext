@@ -8,6 +8,10 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // API 端點
 const TSCHOOL_API = 'https://asia-east1-campus-lite.cloudfunctions.net/tschool/setCalendar';
+const NEXT_API_PAYLOAD = 'https://cst.zeabur.app/api/tschool/payload';
+
+// API 密鑰 - 固定值
+const API_SECRET = 'p8iaUz1YruM+5xVLKGevE7pb2eHx1qeYTmeQyMsXVLSyL1Lmohj38r66yqeoKuhX';
 
 // 測試用的預設週曆資料
 const DEFAULT_CALENDAR_DATA = {
@@ -69,6 +73,54 @@ function getNextMondayOfWeek(date = new Date()) {
   return monday;
 }
 
+// 從 Next.js API 取得組好的 payload
+async function fetchPayloadFromAPI(userData = {}) {
+  const nextMonday = getNextMondayOfWeek();
+  const weekNumber = calculateWeekNumber(nextMonday);
+  const weekStartISO = nextMonday.toISOString().split('T')[0];
+
+  // 構建查詢參數
+  const params = new URLSearchParams({
+    week: weekNumber.toString(),
+    weekStartISO: weekStartISO,
+    ...(userData.email && { userEmail: userData.email })
+  });
+
+  const payloadUrl = `${NEXT_API_PAYLOAD}?${params}`;
+
+  console.log('[ClassSync] 從 Next.js API 取得 payload:', payloadUrl);
+
+  try {
+    const response = await fetch(payloadUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${API_SECRET}`,
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
+      }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(`API 錯誤 ${response.status}: ${response.statusText}\n${errorText}`);
+    }
+
+    const payload = await response.json();
+    console.log('[ClassSync] 成功取得 payload:', {
+      id: payload.id,
+      week: payload.week,
+      email: payload.email,
+      dateKeys: Object.keys(payload).filter(key => key.match(/^\d{4}-\d{2}-\d{2}$/))
+    });
+
+    return payload;
+
+  } catch (error) {
+    console.error('[ClassSync] 無法從 Next.js API 取得 payload:', error);
+    throw new Error(`無法取得週曆資料: ${error.message}`);
+  }
+}
+
 // 主要的 API 調用函數
 async function submitCalendar(idToken, userData = {}) {
   console.log('[ClassSync] === 開始提交週曆 ===');
@@ -76,49 +128,30 @@ async function submitCalendar(idToken, userData = {}) {
   console.log('[ClassSync] 用戶資料:', userData);
 
   try {
-    // 計算下週資料
-    const nextMonday = getNextMondayOfWeek();
-    const weekNumber = calculateWeekNumber(nextMonday);
-    const weeklySchedule = generateWeeklySchedule(nextMonday);
+    // 1. 從 Next.js API 取得組裝好的 payload
+    console.log('[ClassSync] 步驟 1: 從 Next.js API 取得 payload');
+    const payloadData = await fetchPayloadFromAPI(userData);
 
-    // 構建 API payload（根據分析的 API 格式）
-    const payload = {
+    // 2. 構建最終的 setCalendar 請求體
+    const finalPayload = {
       idToken: idToken,
       data: {
-        // 基本用戶資料
-        id: userData.email ? `${userData.email}.${weekNumber}` : `unknown@tschool.tp.edu.tw.${weekNumber}`,
-        week: weekNumber,
-        semester: "114-1", // 可能需要動態計算
-        uid: userData.uid || "unknown-uid",
-        name: userData.name || "測試用戶",
-        email: userData.email || "test@tschool.tp.edu.tw",
-
-        // 時間相關
-        deadline: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19), // 一週後
-        begin: nextMonday.toISOString().replace('T', ' ').substring(0, 19),
-        timestamp: Date.now(),
-
-        // 週曆資料
-        ...weeklySchedule,
-
-        // 紀錄
-        logs: [
-          new Date().toISOString().replace('T', ' ').substring(0, 19)
-        ]
+        ...payloadData,
+        timestamp: Date.now() // 更新送出時間
       },
       nextWeek: true
     };
 
-    console.log('[ClassSync] 構建的 payload:', {
-      hasIdToken: !!payload.idToken,
-      idTokenLength: payload.idToken?.length || 0,
-      dataKeys: Object.keys(payload.data),
-      weekDates: Object.keys(weeklySchedule),
-      nextWeek: payload.nextWeek
+    console.log('[ClassSync] 構建最終 payload:', {
+      hasIdToken: !!finalPayload.idToken,
+      idTokenLength: finalPayload.idToken?.length || 0,
+      dataKeys: Object.keys(finalPayload.data),
+      payloadId: finalPayload.data.id,
+      nextWeek: finalPayload.nextWeek
     });
 
-    // 送出 API 請求
-    console.log('[ClassSync] 送出 API 請求到:', TSCHOOL_API);
+    // 3. 送出 API 請求到 setCalendar
+    console.log('[ClassSync] 步驟 2: 送出到 setCalendar API:', TSCHOOL_API);
 
     const response = await fetch(TSCHOOL_API, {
       method: 'POST',
@@ -127,7 +160,7 @@ async function submitCalendar(idToken, userData = {}) {
         'Accept': '*/*',
         'Cache-Control': 'no-cache'
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(finalPayload)
     });
 
     console.log('[ClassSync] API 回應狀態:', response.status, response.statusText);
